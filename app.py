@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from html import escape
 from datetime import date, timedelta
 from typing import Any
 
@@ -119,18 +120,68 @@ def require_supabase_auth() -> None:
 
 
 def sidebar() -> None:
+    st.markdown(
+        """
+        <style>
+        [data-testid="stSidebar"] div.stButton > button {
+            justify-content: flex-start;
+            text-align: left;
+        }
+        [data-testid="stSidebar"] div.stButton > button:disabled {
+            opacity: 1;
+        }
+        .st-key-sidebar_auth_footer {
+            position: fixed;
+            bottom: 1rem;
+            left: 1rem;
+            width: 16rem;
+            max-width: calc(100vw - 2rem);
+            padding: 0.75rem 0.85rem;
+            border: 1px solid rgba(128, 128, 128, 0.22);
+            border-radius: 0.5rem;
+            background: rgba(255, 255, 255, 0.04);
+        }
+        .sidebar-account-label {
+            font-size: 0.72rem;
+            color: rgba(128, 128, 128, 0.95);
+            margin-bottom: 0.1rem;
+        }
+        .sidebar-account-email {
+            font-size: 0.86rem;
+            font-weight: 500;
+            line-height: 1.25;
+            overflow-wrap: anywhere;
+            margin-bottom: 0.45rem;
+        }
+        .st-key-sidebar_auth_footer div.stButton > button {
+            width: auto;
+            min-height: 2rem;
+            padding: 0.2rem 0.6rem;
+            font-size: 0.85rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     with st.sidebar:
         st.header("Dashboard")
-        user_email = st.session_state.get("supabase_user_email")
-        if user_email:
-            st.caption(user_email)
-            if st.button("Sign out", width="stretch"):
-                st.session_state.pop("supabase_access_token", None)
-                st.session_state.pop("supabase_user_email", None)
-                fetch_table.clear()
-                st.rerun()
         st.button("Holdings", disabled=True, width="stretch", type="primary")
-        st.caption("Data source: Supabase")
+        with st.container(key="sidebar_auth_footer"):
+            user_email = st.session_state.get("supabase_user_email")
+            if user_email:
+                st.markdown(
+                    (
+                        '<div class="sidebar-account-label">Signed in as</div>'
+                        f'<div class="sidebar-account-email">{escape(user_email)}</div>'
+                    ),
+                    unsafe_allow_html=True,
+                )
+                if st.button("Sign out", key="sign_out"):
+                    st.session_state.pop("supabase_access_token", None)
+                    st.session_state.pop("supabase_user_email", None)
+                    fetch_table.clear()
+                    st.rerun()
 
 
 @st.cache_data(ttl=300)
