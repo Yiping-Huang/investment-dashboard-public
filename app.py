@@ -304,6 +304,53 @@ def load_transactions(portfolio_schema: str, symbol: str) -> pd.DataFrame:
     return frame
 
 
+def load_fund_yields(price_schema: str, symbol: str, start_date: date) -> pd.DataFrame:
+    rows = fetch_table(
+        price_schema,
+        "fund_yields",
+        (
+            ("select", "symbol,metric_date,twelve_month_trailing_yield,annualized_distribution_yield,gross_yield,source,fetched_at"),
+            ("symbol", f"eq.{symbol}"),
+            ("metric_date", f"gte.{start_date.isoformat()}"),
+            ("order", "metric_date.asc"),
+        ),
+        supabase_auth_token(),
+    )
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+
+    frame["metric_date"] = pd.to_datetime(frame["metric_date"])
+    for column in [
+        "twelve_month_trailing_yield",
+        "annualized_distribution_yield",
+        "gross_yield",
+    ]:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    return frame
+
+
+def load_fund_distributions(price_schema: str, symbol: str) -> pd.DataFrame:
+    rows = fetch_table(
+        price_schema,
+        "fund_distributions",
+        (
+            ("select", "symbol,ex_dividend_date,record_date,payment_date,payment_amount,distribution_period,source,fetched_at"),
+            ("symbol", f"eq.{symbol}"),
+            ("order", "ex_dividend_date.desc"),
+        ),
+        supabase_auth_token(),
+    )
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+
+    for column in ["ex_dividend_date", "record_date", "payment_date"]:
+        frame[column] = pd.to_datetime(frame[column])
+    frame["payment_amount"] = pd.to_numeric(frame["payment_amount"], errors="coerce")
+    return frame
+
+
 def holding_symbol_options(assets: pd.DataFrame) -> list[str]:
     symbols = [str(symbol) for symbol in assets["symbol"].dropna().tolist()]
     available_symbols = set(symbols)
@@ -404,6 +451,9 @@ def position_value_data(
                 "Date": price_date,
                 "Market Value": market_value,
                 "Cost Basis": cost_basis,
+                "Target Value": target_value,
+                "Comfort Zone Low": target_value * (1 - COMFORT_ZONE_MULTIPLIER),
+                "Comfort Zone High": target_value * (1 + COMFORT_ZONE_MULTIPLIER),
                 "Target Growth": target_value - cost_basis,
                 "Actual Growth": market_value - cost_basis,
                 "Comfort Zone Low Growth": target_value
@@ -428,6 +478,7 @@ def chart_palette() -> dict[str, str]:
         return {
             "actual": "#60a5fa",
             "average_cost": "#f87171",
+            "cost_basis": "#fbbf24",
             "target_growth": "#22c55e",
             "comfort_area": "#64748b",
             "comfort_label": "#cbd5e1",
@@ -435,6 +486,7 @@ def chart_palette() -> dict[str, str]:
     return {
         "actual": "#2563eb",
         "average_cost": "#dc2626",
+        "cost_basis": "#d97706",
         "target_growth": "#16a34a",
         "comfort_area": "#64748b",
         "comfort_label": "#111827",
@@ -448,6 +500,153 @@ def chart_label_dates(prices: pd.DataFrame) -> tuple[pd.Timestamp, pd.Timestamp]
         int((prices["price_date"].max() - prices["price_date"].min()).days * 0.02),
     )
     return end_date, end_date + pd.Timedelta(days=label_offset_days)
+
+
+def render_position_total_value_chart(
+    prices: pd.DataFrame,
+    transactions: pd.DataFrame,
+    target_cagr: float,
+) -> None:
+    position_data = position_value_data(prices, transactions, target_cagr)
+    if position_data.empty:
+        return
+
+    palette = chart_palette()
+    _, label_date = chart_label_dates(prices)
+    latest = position_data.iloc[-1]
+    target_value_label = f"Target Value ({target_cagr:.1%} CAGR)"
+    labels = pd.DataFrame(
+        [
+            {
+                "Date": label_date,
+                "Value": latest["Market Value"],
+                "Label": "Market Value",
+            },
+            {
+                "Date": label_date,
+                "Value": latest["Target Value"],
+                "Label": target_value_label,
+            },
+            {
+                "Date": label_date,
+                "Value": latest["Cost Basis"],
+                "Label": "Principal Value",
+            },
+            {
+                "Date": label_date,
+                "Value": latest["Comfort Zone High"],
+                "Label": "Comfort Zone +10%",
+            },
+            {
+                "Date": label_date,
+                "Value": latest["Comfort Zone Low"],
+                "Label": "Comfort Zone -10%",
+            },
+        ]
+    )
+
+    chart = alt.layer(
+        alt.Chart(position_data)
+        .mark_area(color=palette["comfort_area"], opacity=0.22)
+        .encode(
+            x=alt.X("Date:T", title="Date"),
+            y=alt.Y(
+                "Comfort Zone Low:Q",
+                title="Value (CAD)",
+                scale=alt.Scale(zero=False),
+            ),
+            y2="Comfort Zone High:Q",
+            tooltip=[
+                alt.Tooltip("Date:T", title="Date"),
+                alt.Tooltip(
+                    "Comfort Zone Low:Q",
+                    title="Comfort Zone -10%",
+                    format=",.2f",
+                ),
+                alt.Tooltip(
+                    "Comfort Zone High:Q",
+                    title="Comfort Zone +10%",
+                    format=",.2f",
+                ),
+            ],
+        ),
+        alt.Chart(position_data)
+        .mark_line(color=palette["target_growth"], strokeDash=[7, 5], strokeWidth=2.5)
+        .encode(
+            x=alt.X("Date:T", title="Date"),
+            y=alt.Y(
+                "Target Value:Q",
+                title="Value (CAD)",
+                scale=alt.Scale(zero=False),
+            ),
+            tooltip=[
+                alt.Tooltip("Date:T", title="Date"),
+                alt.Tooltip("Target Value:Q", title=target_value_label, format=",.2f"),
+            ],
+        ),
+        alt.Chart(position_data)
+        .mark_line(
+            color=palette["cost_basis"],
+            interpolate="step-after",
+            strokeWidth=2,
+        )
+        .encode(
+            x=alt.X("Date:T", title="Date"),
+            y=alt.Y(
+                "Cost Basis:Q",
+                title="Value (CAD)",
+                scale=alt.Scale(zero=False),
+            ),
+            tooltip=[
+                alt.Tooltip("Date:T", title="Date"),
+                alt.Tooltip("Cost Basis:Q", title="Principal Value", format=",.2f"),
+            ],
+        ),
+        alt.Chart(position_data)
+        .mark_line(color=palette["actual"], strokeWidth=2.5)
+        .encode(
+            x=alt.X("Date:T", title="Date"),
+            y=alt.Y(
+                "Market Value:Q",
+                title="Value (CAD)",
+                scale=alt.Scale(zero=False),
+            ),
+            tooltip=[
+                alt.Tooltip("Date:T", title="Date"),
+                alt.Tooltip("Market Value:Q", title="Market Value", format=",.2f"),
+            ],
+        ),
+        alt.Chart(labels)
+        .mark_text(align="left", baseline="middle", dx=6, fontSize=12)
+        .encode(
+            x=alt.X("Date:T", title="Date"),
+            y=alt.Y("Value:Q", title="Value (CAD)", scale=alt.Scale(zero=False)),
+            text="Label:N",
+            color=alt.Color(
+                "Label:N",
+                scale=alt.Scale(
+                    domain=[
+                        "Market Value",
+                        target_value_label,
+                        "Principal Value",
+                        "Comfort Zone +10%",
+                        "Comfort Zone -10%",
+                    ],
+                    range=[
+                        palette["actual"],
+                        palette["target_growth"],
+                        palette["cost_basis"],
+                        palette["comfort_label"],
+                        palette["comfort_label"],
+                    ],
+                ),
+                legend=None,
+            ),
+        ),
+    ).resolve_scale(y="shared").properties(height=420)
+
+    st.subheader("My VFV Position Value")
+    st.altair_chart(chart, width="stretch")
 
 
 def render_position_value_chart(
@@ -489,7 +688,7 @@ def render_position_value_chart(
     )
     chart = alt.layer(
         alt.Chart(position_data)
-        .mark_area(color=palette["comfort_area"], opacity=0.13)
+        .mark_area(color=palette["comfort_area"], opacity=0.22)
         .encode(
             x=alt.X("Date:T", title="Date"),
             y=alt.Y(
@@ -683,6 +882,291 @@ def render_price_vs_cost_chart(
     )
 
 
+def transaction_cash_amount(row: Any) -> float:
+    quantity = 0 if pd.isna(row.quantity) else float(row.quantity or 0)
+    price = 0 if pd.isna(row.price) else float(row.price or 0)
+    if quantity and price:
+        return quantity * price
+    if price:
+        return price
+    return quantity
+
+
+def cash_position_summary(transactions: pd.DataFrame) -> dict[str, float | None]:
+    if transactions.empty:
+        return {
+            "principal": None,
+            "dividends": None,
+            "total_value": None,
+            "gain_rate": None,
+        }
+
+    principal = 0.0
+    dividends = 0.0
+    for row in transactions.itertuples():
+        amount = transaction_cash_amount(row)
+        fees = 0 if pd.isna(row.fees) else float(row.fees or 0)
+        if row.transaction_type == "buy":
+            principal += amount + fees
+        elif row.transaction_type == "sell":
+            principal -= amount - fees
+        elif row.transaction_type == "dividend":
+            dividends += amount
+
+    total_value = principal + dividends
+    gain_rate = dividends / principal if principal else None
+    return {
+        "principal": principal,
+        "dividends": dividends,
+        "total_value": total_value,
+        "gain_rate": gain_rate,
+    }
+
+
+def last_business_day_next_month(value: date) -> date:
+    year = value.year + (1 if value.month == 12 else 0)
+    month = 1 if value.month == 12 else value.month + 1
+    next_month = 1 if month == 12 else month + 1
+    next_year = year + (1 if month == 12 else 0)
+    current = date(next_year, next_month, 1) - timedelta(days=1)
+    while current.weekday() >= 5:
+        current -= timedelta(days=1)
+    return current
+
+
+def expected_distribution_dates(distributions: pd.DataFrame) -> tuple[str, str]:
+    if distributions.empty:
+        return "Not available", "Not available"
+
+    today = pd.Timestamp(date.today())
+    future_ex = distributions[distributions["ex_dividend_date"] >= today]
+    future_payment = distributions[distributions["payment_date"] >= today]
+
+    if not future_ex.empty:
+        ex_date = future_ex.sort_values("ex_dividend_date").iloc[0]["ex_dividend_date"]
+        ex_label = ex_date.date().isoformat()
+    else:
+        latest_ex = distributions["ex_dividend_date"].max().date()
+        ex_label = f"~{last_business_day_next_month(latest_ex).isoformat()}"
+
+    if not future_payment.empty:
+        payment_date = future_payment.sort_values("payment_date").iloc[0]["payment_date"]
+        payment_label = payment_date.date().isoformat()
+    else:
+        latest_payment = distributions["payment_date"].max().date()
+        payment_label = f"~{(last_business_day_next_month(latest_payment) + timedelta(days=7)).isoformat()}"
+
+    return ex_label, payment_label
+
+
+def latest_metric_row(frame: pd.DataFrame) -> pd.Series | None:
+    if frame.empty:
+        return None
+    preferred = frame[frame["source"] == "globalx_product_page"]
+    if not preferred.empty:
+        return preferred.sort_values("metric_date").iloc[-1]
+    return frame.sort_values("metric_date").iloc[-1]
+
+
+def yield_chart_data(yields: pd.DataFrame) -> pd.DataFrame:
+    if yields.empty:
+        return yields
+
+    source_rank = {"derived_distribution_ttm": 0, "globalx_product_page": 1}
+    chart_data = yields.copy()
+    chart_data["source_rank"] = chart_data["source"].map(source_rank).fillna(0)
+    chart_data = chart_data.sort_values(["metric_date", "source_rank"])
+    chart_data = chart_data.drop_duplicates("metric_date", keep="last")
+    chart_data["12-Month Trailing Yield"] = (
+        chart_data["twelve_month_trailing_yield"] * 100
+    )
+    return chart_data
+
+
+def render_cash_yield_chart(yields: pd.DataFrame) -> None:
+    chart_data = yield_chart_data(yields)
+    if chart_data.empty:
+        st.info("No CASH.TO yield history found yet.")
+        return
+
+    palette = chart_palette()
+    _, label_date = chart_label_dates(chart_data.rename(columns={"metric_date": "price_date"}))
+    latest = chart_data.iloc[-1]
+    label = pd.DataFrame(
+        {
+            "Date": [label_date],
+            "Yield": [latest["12-Month Trailing Yield"]],
+            "Label": ["Derived 12-Month Distribution Yield"],
+        }
+    )
+
+    chart = alt.layer(
+        alt.Chart(chart_data)
+        .mark_line(color=palette["actual"], strokeWidth=2.5, interpolate="step-after")
+        .encode(
+            x=alt.X("metric_date:T", title="Date"),
+            y=alt.Y(
+                "12-Month Trailing Yield:Q",
+                title="Yield (%)",
+                scale=alt.Scale(zero=False),
+            ),
+            tooltip=[
+                alt.Tooltip("metric_date:T", title="Date"),
+                alt.Tooltip(
+                    "12-Month Trailing Yield:Q",
+                    title="Derived 12-Month Distribution Yield",
+                    format=".2f",
+                ),
+                alt.Tooltip("source:N", title="Source"),
+            ],
+        ),
+        alt.Chart(label)
+        .mark_text(
+            align="left",
+            baseline="middle",
+            dx=6,
+            fontSize=12,
+            color=palette["actual"],
+        )
+        .encode(
+            x=alt.X("Date:T", title="Date"),
+            y=alt.Y("Yield:Q", title="Yield (%)", scale=alt.Scale(zero=False)),
+            text="Label:N",
+        ),
+    ).resolve_scale(y="shared").properties(height=380)
+
+    st.subheader("CASH.TO Derived 12-Month Distribution Yield")
+    st.altair_chart(chart, width="stretch")
+
+
+def cash_dividend_data(transactions: pd.DataFrame) -> pd.DataFrame:
+    if transactions.empty:
+        return pd.DataFrame()
+
+    dividends = transactions[transactions["transaction_type"] == "dividend"].copy()
+    if dividends.empty:
+        return pd.DataFrame()
+
+    dividends["Amount"] = [
+        transaction_cash_amount(row) for row in dividends.itertuples()
+    ]
+    dividends = dividends[dividends["Amount"] > 0]
+    if dividends.empty:
+        return pd.DataFrame()
+
+    dividends["Payment Month"] = dividends["transaction_date"].dt.to_period("M").dt.to_timestamp()
+    return (
+        dividends.groupby("Payment Month", as_index=False)["Amount"]
+        .sum()
+        .sort_values("Payment Month")
+    )
+
+
+def render_cash_dividend_chart(transactions: pd.DataFrame) -> None:
+    chart_data = cash_dividend_data(transactions)
+    if chart_data.empty:
+        return
+
+    st.subheader("CASH.TO Dividends Received")
+    chart = (
+        alt.Chart(chart_data)
+        .mark_bar(color=chart_palette()["target_growth"], opacity=0.82)
+        .encode(
+            x=alt.X("Payment Month:T", title="Payment month"),
+            y=alt.Y("Amount:Q", title="Dividend received (CAD)"),
+            tooltip=[
+                alt.Tooltip("Payment Month:T", title="Payment month"),
+                alt.Tooltip("Amount:Q", title="Dividend received", format=",.2f"),
+            ],
+        )
+        .properties(height=320)
+    )
+    st.altair_chart(chart, width="stretch")
+
+
+def render_cash_page(
+    price_schema: str,
+    portfolio_schema: str,
+    lookback_days: int | None,
+    show_rows: bool,
+) -> None:
+    start_date = (
+        date(2026, 5, 22)
+        if lookback_days is None
+        else date.today() - timedelta(days=lookback_days)
+    )
+
+    try:
+        transactions = load_transactions(portfolio_schema, "CASH.TO")
+    except RuntimeError:
+        transactions = pd.DataFrame()
+
+    try:
+        yields = load_fund_yields(price_schema, "CASH.TO", start_date)
+        distributions = load_fund_distributions(price_schema, "CASH.TO")
+    except RuntimeError as error:
+        st.error(str(error))
+        st.stop()
+
+    summary = cash_position_summary(transactions)
+    latest_yield = latest_metric_row(yields)
+    expected_ex_date, expected_payment_date = expected_distribution_dates(distributions)
+
+    st.subheader("CASH.TO - Global X High Interest Savings ETF")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric(
+        "Principal value",
+        f"{summary['principal']:,.2f}" if summary["principal"] is not None else "Not set",
+    )
+    col2.metric(
+        "Dividends received",
+        f"{summary['dividends']:,.2f}" if summary["dividends"] is not None else "Not set",
+    )
+    col3.metric(
+        "Total value + dividends",
+        f"{summary['total_value']:,.2f}" if summary["total_value"] is not None else "Not set",
+    )
+    col4.metric(
+        "Dividend gain rate",
+        f"{summary['gain_rate']:.2%}" if summary["gain_rate"] is not None else "Not set",
+    )
+
+    col5, col6, col7 = st.columns(3)
+    col5.metric(
+        "12-month trailing yield",
+        (
+            f"{latest_yield['twelve_month_trailing_yield']:.2%}"
+            if latest_yield is not None
+            and pd.notna(latest_yield["twelve_month_trailing_yield"])
+            else "Not set"
+        ),
+        (
+            latest_yield["metric_date"].date().isoformat()
+            if latest_yield is not None
+            else None
+        ),
+    )
+    col6.metric("Expected ex-dividend date", expected_ex_date)
+    col7.metric("Expected payment date", expected_payment_date)
+
+    st.caption(
+        "CASH.TO yield history uses official Global X observations when available. "
+        "Older backfill rows are derived from official distributions and market closes."
+    )
+
+    render_cash_yield_chart(yields)
+    render_cash_dividend_chart(transactions)
+
+    if show_rows:
+        st.subheader("Yield Rows")
+        st.dataframe(yields, width="stretch", hide_index=True)
+        st.subheader("Distribution Rows")
+        st.dataframe(distributions, width="stretch", hide_index=True)
+        if not transactions.empty:
+            st.subheader("Transaction Rows")
+            st.dataframe(transactions, width="stretch", hide_index=True)
+
+
 def render_asset_page(
     price_schema: str,
     portfolio_schema: str,
@@ -775,6 +1259,7 @@ def render_asset_page(
         f"{total_return_pct:.2%}" if total_return_pct is not None else None,
     )
 
+    render_position_total_value_chart(prices, transactions, target_cagr)
     render_position_value_chart(prices, transactions, target_cagr)
     render_price_vs_cost_chart(prices, average_cost, transactions)
 
@@ -838,25 +1323,31 @@ def main() -> None:
             list(HISTORY_WINDOW_OPTIONS.keys()),
             index=list(HISTORY_WINDOW_OPTIONS.keys()).index("180 Days"),
         )
-        target_cagr_pct = st.number_input(
-            "Target CAGR",
-            min_value=-50.0,
-            max_value=50.0,
-            value=DEFAULT_TARGET_CAGR * 100,
-            step=0.5,
-            format="%.1f",
-        )
+        target_cagr_pct = DEFAULT_TARGET_CAGR * 100
+        if selected_symbol != "CASH.TO":
+            target_cagr_pct = st.number_input(
+                "Target CAGR",
+                min_value=-50.0,
+                max_value=50.0,
+                value=DEFAULT_TARGET_CAGR * 100,
+                step=0.5,
+                format="%.1f",
+            )
         show_rows = st.checkbox("Show raw rows", value=False)
 
-    render_asset_page(
-        price_schema,
-        portfolio_schema,
-        assets,
-        HISTORY_WINDOW_OPTIONS[history_window_label],
-        target_cagr_pct / 100,
-        show_rows,
-        selected_symbol,
-    )
+    lookback_days = HISTORY_WINDOW_OPTIONS[history_window_label]
+    if selected_symbol == "CASH.TO":
+        render_cash_page(price_schema, portfolio_schema, lookback_days, show_rows)
+    else:
+        render_asset_page(
+            price_schema,
+            portfolio_schema,
+            assets,
+            lookback_days,
+            target_cagr_pct / 100,
+            show_rows,
+            selected_symbol,
+        )
 
 
 if __name__ == "__main__":
