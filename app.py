@@ -875,7 +875,7 @@ def render_price_vs_cost_chart(
             )
         )
 
-    st.subheader("VFV Price vs Cost Basis")
+    st.subheader("VFV Price vs My Average Cost Basis")
     st.altair_chart(
         alt.layer(*layers).resolve_scale(y="shared").properties(height=420),
         width="stretch",
@@ -892,31 +892,51 @@ def transaction_cash_amount(row: Any) -> float:
     return quantity
 
 
-def cash_position_summary(transactions: pd.DataFrame) -> dict[str, float | None]:
+def cash_position_summary(
+    transactions: pd.DataFrame,
+    prices: pd.DataFrame,
+) -> dict[str, float | None]:
     if transactions.empty:
         return {
             "principal": None,
+            "quantity": None,
+            "latest_close": None,
+            "market_value": None,
             "dividends": None,
             "total_value": None,
             "gain_rate": None,
         }
 
     principal = 0.0
+    quantity = 0.0
     dividends = 0.0
     for row in transactions.itertuples():
         amount = transaction_cash_amount(row)
         fees = 0 if pd.isna(row.fees) else float(row.fees or 0)
+        row_quantity = 0 if pd.isna(row.quantity) else float(row.quantity or 0)
         if row.transaction_type == "buy":
             principal += amount + fees
+            quantity += row_quantity
         elif row.transaction_type == "sell":
             principal -= amount - fees
+            quantity -= row_quantity
         elif row.transaction_type == "dividend":
             dividends += amount
 
-    total_value = principal + dividends
-    gain_rate = dividends / principal if principal else None
+    latest_close = None
+    market_value = None
+    if not prices.empty and quantity:
+        latest_close = float(prices.iloc[-1]["close"])
+        market_value = latest_close * quantity
+
+    total_value = market_value + dividends if market_value is not None else None
+    total_gain = total_value - principal if total_value is not None else None
+    gain_rate = total_gain / principal if total_gain is not None and principal else None
     return {
         "principal": principal,
+        "quantity": quantity,
+        "latest_close": latest_close,
+        "market_value": market_value,
         "dividends": dividends,
         "total_value": total_value,
         "gain_rate": gain_rate,
@@ -947,14 +967,16 @@ def expected_distribution_dates(distributions: pd.DataFrame) -> tuple[str, str]:
         ex_label = ex_date.date().isoformat()
     else:
         latest_ex = distributions["ex_dividend_date"].max().date()
-        ex_label = f"~{last_business_day_next_month(latest_ex).isoformat()}"
+        ex_label = last_business_day_next_month(latest_ex).isoformat()
 
     if not future_payment.empty:
         payment_date = future_payment.sort_values("payment_date").iloc[0]["payment_date"]
         payment_label = payment_date.date().isoformat()
     else:
         latest_payment = distributions["payment_date"].max().date()
-        payment_label = f"~{(last_business_day_next_month(latest_payment) + timedelta(days=7)).isoformat()}"
+        payment_label = (
+            last_business_day_next_month(latest_payment) + timedelta(days=7)
+        ).isoformat()
 
     return ex_label, payment_label
 
@@ -1067,16 +1089,16 @@ def render_cash_dividend_chart(transactions: pd.DataFrame) -> None:
     if chart_data.empty:
         return
 
-    st.subheader("CASH.TO Dividends Received")
+    st.subheader("CASH.TO Distributions Received")
     chart = (
         alt.Chart(chart_data)
         .mark_bar(color=chart_palette()["target_growth"], opacity=0.82)
         .encode(
             x=alt.X("Payment Month:T", title="Payment month"),
-            y=alt.Y("Amount:Q", title="Dividend received (CAD)"),
+            y=alt.Y("Amount:Q", title="Distribution received (CAD)"),
             tooltip=[
                 alt.Tooltip("Payment Month:T", title="Payment month"),
-                alt.Tooltip("Amount:Q", title="Dividend received", format=",.2f"),
+                alt.Tooltip("Amount:Q", title="Distribution received", format=",.2f"),
             ],
         )
         .properties(height=320)
@@ -1102,13 +1124,14 @@ def render_cash_page(
         transactions = pd.DataFrame()
 
     try:
+        prices = load_prices(price_schema, "CASH.TO", start_date)
         yields = load_fund_yields(price_schema, "CASH.TO", start_date)
         distributions = load_fund_distributions(price_schema, "CASH.TO")
     except RuntimeError as error:
         st.error(str(error))
         st.stop()
 
-    summary = cash_position_summary(transactions)
+    summary = cash_position_summary(transactions, prices)
     latest_yield = latest_metric_row(yields)
     expected_ex_date, expected_payment_date = expected_distribution_dates(distributions)
 
@@ -1119,15 +1142,20 @@ def render_cash_page(
         f"{summary['principal']:,.2f}" if summary["principal"] is not None else "Not set",
     )
     col2.metric(
-        "Dividends received",
+        "Distributions received",
         f"{summary['dividends']:,.2f}" if summary["dividends"] is not None else "Not set",
     )
     col3.metric(
         "Total value + dividends",
         f"{summary['total_value']:,.2f}" if summary["total_value"] is not None else "Not set",
+        (
+            f"Market value {summary['market_value']:,.2f}"
+            if summary["market_value"] is not None
+            else None
+        ),
     )
     col4.metric(
-        "Dividend gain rate",
+        "Total return",
         f"{summary['gain_rate']:.2%}" if summary["gain_rate"] is not None else "Not set",
     )
 
@@ -1157,14 +1185,17 @@ def render_cash_page(
     render_cash_yield_chart(yields)
     render_cash_dividend_chart(transactions)
 
+    if transactions.empty:
+        st.info("No transaction history found for CASH.TO.")
+    else:
+        st.subheader("Transaction History")
+        st.dataframe(transactions, width="stretch", hide_index=True)
+
     if show_rows:
         st.subheader("Yield Rows")
         st.dataframe(yields, width="stretch", hide_index=True)
         st.subheader("Distribution Rows")
         st.dataframe(distributions, width="stretch", hide_index=True)
-        if not transactions.empty:
-            st.subheader("Transaction Rows")
-            st.dataframe(transactions, width="stretch", hide_index=True)
 
 
 def render_asset_page(
