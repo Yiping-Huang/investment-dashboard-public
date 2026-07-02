@@ -20,6 +20,7 @@ DEFAULT_SYMBOL = "VFV.TO"
 DEFAULT_TARGET_CAGR = 0.10
 COMFORT_ZONE_MULTIPLIER = 0.10
 VANCOUVER_TZ = ZoneInfo("America/Vancouver")
+TARGET_PRICE_PATH_START_DATE = date(2026, 4, 15)
 PREFERRED_HOLDING_SYMBOLS = [DEFAULT_SYMBOL, "CASH.TO", "QQQ"]
 HISTORY_WINDOW_OPTIONS = {
     "All Time": None,
@@ -470,6 +471,39 @@ def position_value_data(
     return pd.DataFrame(rows)
 
 
+def target_price_path_data(prices: pd.DataFrame, target_cagr: float) -> pd.DataFrame:
+    if prices.empty:
+        return pd.DataFrame()
+
+    start_timestamp = pd.Timestamp(TARGET_PRICE_PATH_START_DATE)
+    path_prices = prices[prices["price_date"] >= start_timestamp].copy()
+    if path_prices.empty:
+        return pd.DataFrame()
+
+    path_prices = path_prices.sort_values("price_date")
+    start_row = path_prices.iloc[0]
+    start_date = start_row["price_date"].normalize()
+    start_price = float(start_row["close"])
+
+    rows: list[dict[str, Any]] = []
+    for price_row in path_prices.itertuples():
+        price_date = price_row.price_date.normalize()
+        elapsed_days = (price_date - start_date).days
+        expected_price = start_price * ((1 + target_cagr) ** (elapsed_days / 365))
+        rows.append(
+            {
+                "Date": price_date,
+                "Expected Growth Path": expected_price,
+                "Comfort Zone Low": expected_price
+                * (1 - COMFORT_ZONE_MULTIPLIER),
+                "Comfort Zone High": expected_price
+                * (1 + COMFORT_ZONE_MULTIPLIER),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
 def is_dark_theme() -> bool:
     try:
         theme_type = st.context.theme.get("type")
@@ -633,7 +667,7 @@ def render_position_total_value_chart(
             ("Market Value", palette["actual"]),
             (target_value_label, palette["target_growth"]),
             ("Principal Value", palette["cost_basis"]),
-            ("Comfort Zone", palette["comfort_label"]),
+            ("Comfort Zone (+/-10%)", palette["comfort_label"]),
         ]
     )
 
@@ -702,7 +736,7 @@ def render_position_value_chart(
         [
             ("Actual Growth", palette["actual"]),
             (target_growth_label, palette["target_growth"]),
-            ("Comfort Zone", palette["comfort_label"]),
+            ("Comfort Zone (+/-10%)", palette["comfort_label"]),
         ]
     )
 
@@ -710,13 +744,68 @@ def render_position_value_chart(
 def render_price_vs_cost_chart(
     prices: pd.DataFrame,
     average_cost: float | None,
+    target_cagr: float,
     transactions: pd.DataFrame,
 ) -> None:
     palette = chart_palette()
     chart_data = prices[["price_date", "close"]].rename(
         columns={"price_date": "Date", "close": "Price"}
     )
-    layers = [
+    target_path = target_price_path_data(prices, target_cagr)
+    expected_path_label = f"Expected Growth Path ({target_cagr:.1%} CAGR)"
+    layers = []
+    if not target_path.empty:
+        layers.append(
+            alt.Chart(target_path)
+            .mark_area(color=palette["comfort_area"], opacity=0.22)
+            .encode(
+                x=alt.X("Date:T", title="Date"),
+                y=alt.Y(
+                    "Comfort Zone Low:Q",
+                    title="Price (CAD)",
+                    scale=alt.Scale(zero=False),
+                ),
+                y2="Comfort Zone High:Q",
+                tooltip=[
+                    alt.Tooltip("Date:T", title="Date"),
+                    alt.Tooltip(
+                        "Comfort Zone Low:Q",
+                        title="Comfort Zone -10%",
+                        format=",.2f",
+                    ),
+                    alt.Tooltip(
+                        "Comfort Zone High:Q",
+                        title="Comfort Zone +10%",
+                        format=",.2f",
+                    ),
+                ],
+            )
+        )
+        layers.append(
+            alt.Chart(target_path)
+            .mark_line(
+                color=palette["target_growth"],
+                strokeDash=[7, 5],
+                strokeWidth=2.5,
+            )
+            .encode(
+                x=alt.X("Date:T", title="Date"),
+                y=alt.Y(
+                    "Expected Growth Path:Q",
+                    title="Price (CAD)",
+                    scale=alt.Scale(zero=False),
+                ),
+                tooltip=[
+                    alt.Tooltip("Date:T", title="Date"),
+                    alt.Tooltip(
+                        "Expected Growth Path:Q",
+                        title=expected_path_label,
+                        format=",.2f",
+                    ),
+                ],
+            )
+        )
+    layers.append(
         alt.Chart(chart_data)
         .mark_line(color=palette["actual"], strokeWidth=2.5)
         .encode(
@@ -727,7 +816,7 @@ def render_price_vs_cost_chart(
                 alt.Tooltip("Price:Q", title="Market Price", format=",.2f"),
             ],
         )
-    ]
+    )
 
     if average_cost is not None:
         layers.append(
@@ -744,6 +833,30 @@ def render_price_vs_cost_chart(
                 ],
             )
         )
+        cost_label = pd.DataFrame(
+            {
+                "Date": [chart_data["Date"].max()],
+                "Average Cost Basis": [average_cost],
+                "Label": [f"{average_cost:,.2f}"],
+            }
+        )
+        layers.append(
+            alt.Chart(cost_label)
+            .mark_text(
+                align="right",
+                baseline="bottom",
+                dx=-6,
+                dy=-4,
+                fontSize=12,
+                fontWeight="bold",
+                color=palette["average_cost"],
+            )
+            .encode(
+                x=alt.X("Date:T", title="Date"),
+                y=alt.Y("Average Cost Basis:Q", scale=alt.Scale(zero=False)),
+                text="Label:N",
+            )
+        )
 
     buys = transactions[
         (transactions["transaction_type"] == "buy")
@@ -758,6 +871,7 @@ def render_price_vs_cost_chart(
                 "quantity": "Quantity",
             }
         )
+        buys["Price Label"] = buys["Purchase price"].map(lambda value: f"{value:,.2f}")
         layers.append(
             alt.Chart(buys)
             .mark_circle(size=95, color="#f97316", opacity=0.9)
@@ -773,6 +887,22 @@ def render_price_vs_cost_chart(
                 ],
             )
         )
+        layers.append(
+            alt.Chart(buys)
+            .mark_text(
+                align="center",
+                baseline="bottom",
+                dy=-10,
+                fontSize=11,
+                fontWeight="bold",
+                color="#f97316",
+            )
+            .encode(
+                x=alt.X("Date:T", title=None),
+                y=alt.Y("Purchase price:Q", scale=alt.Scale(zero=False)),
+                text="Price Label:N",
+            )
+        )
 
     st.subheader("VFV Price vs My Average Cost Basis")
     st.altair_chart(
@@ -780,6 +910,9 @@ def render_price_vs_cost_chart(
         width="stretch",
     )
     legend_items = [("Market Price", palette["actual"])]
+    if not target_path.empty:
+        legend_items.append((expected_path_label, palette["target_growth"]))
+        legend_items.append(("Comfort Zone (+/-10%)", palette["comfort_label"]))
     if average_cost is not None:
         legend_items.append(("Average Cost Basis", palette["average_cost"]))
     if not transactions.empty:
@@ -1235,7 +1368,7 @@ def render_asset_page(
 
     render_position_total_value_chart(prices, transactions, target_cagr)
     render_position_value_chart(prices, transactions, target_cagr)
-    render_price_vs_cost_chart(prices, average_cost, transactions)
+    render_price_vs_cost_chart(prices, average_cost, target_cagr, transactions)
 
     if not transactions.empty:
         st.subheader("Transaction History")
