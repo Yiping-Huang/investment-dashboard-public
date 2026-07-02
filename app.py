@@ -6,6 +6,7 @@ import os
 from html import escape
 from datetime import date, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import altair as alt
 import pandas as pd
@@ -18,6 +19,7 @@ DEFAULT_PORTFOLIO_SCHEMA = "portfolio"
 DEFAULT_SYMBOL = "VFV.TO"
 DEFAULT_TARGET_CAGR = 0.10
 COMFORT_ZONE_MULTIPLIER = 0.10
+VANCOUVER_TZ = ZoneInfo("America/Vancouver")
 PREFERRED_HOLDING_SYMBOLS = [DEFAULT_SYMBOL, "CASH.TO", "QQQ"]
 HISTORY_WINDOW_OPTIONS = {
     "All Time": None,
@@ -468,13 +470,16 @@ def position_value_data(
     return pd.DataFrame(rows)
 
 
-def chart_palette() -> dict[str, str]:
+def is_dark_theme() -> bool:
     try:
         theme_type = st.context.theme.get("type")
     except Exception:
         theme_type = None
-    is_dark = (theme_type or st.get_option("theme.base")) != "light"
-    if is_dark:
+    return (theme_type or st.get_option("theme.base")) != "light"
+
+
+def chart_palette() -> dict[str, str]:
+    if is_dark_theme():
         return {
             "actual": "#60a5fa",
             "average_cost": "#f87171",
@@ -493,13 +498,47 @@ def chart_palette() -> dict[str, str]:
     }
 
 
-def chart_label_dates(prices: pd.DataFrame) -> tuple[pd.Timestamp, pd.Timestamp]:
-    end_date = prices["price_date"].max()
-    label_offset_days = max(
-        1,
-        int((prices["price_date"].max() - prices["price_date"].min()).days * 0.02),
+def chart_legend(items: list[tuple[str, str]]) -> None:
+    text_color = "#f9fafb" if is_dark_theme() else "#111827"
+    legend_items = "".join(
+        f"""
+        <div style="
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            min-height: 1.25rem;
+            margin: 0;
+            color: {text_color};
+            font-size: 0.85rem;
+            line-height: 1.2;
+            white-space: nowrap;
+        ">
+            <div style="
+                flex: 0 0 auto;
+                width: 1.4rem;
+                height: 0.2rem;
+                border-radius: 999px;
+                background: {escape(color)};
+            "></div>
+            <div style="line-height: 1.2;">{escape(label)}</div>
+        </div>
+        """
+        for label, color in items
     )
-    return end_date, end_date + pd.Timedelta(days=label_offset_days)
+    st.markdown(
+        f"""
+        <div style="
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: center;
+            gap: 0.45rem 1rem;
+            line-height: 1.2;
+            margin: -0.35rem 0 0.75rem 0;
+        ">{legend_items}</div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_position_total_value_chart(
@@ -512,38 +551,7 @@ def render_position_total_value_chart(
         return
 
     palette = chart_palette()
-    _, label_date = chart_label_dates(prices)
-    latest = position_data.iloc[-1]
     target_value_label = f"Target Value ({target_cagr:.1%} CAGR)"
-    labels = pd.DataFrame(
-        [
-            {
-                "Date": label_date,
-                "Value": latest["Market Value"],
-                "Label": "Market Value",
-            },
-            {
-                "Date": label_date,
-                "Value": latest["Target Value"],
-                "Label": target_value_label,
-            },
-            {
-                "Date": label_date,
-                "Value": latest["Cost Basis"],
-                "Label": "Principal Value",
-            },
-            {
-                "Date": label_date,
-                "Value": latest["Comfort Zone High"],
-                "Label": "Comfort Zone +10%",
-            },
-            {
-                "Date": label_date,
-                "Value": latest["Comfort Zone Low"],
-                "Label": "Comfort Zone -10%",
-            },
-        ]
-    )
 
     chart = alt.layer(
         alt.Chart(position_data)
@@ -616,37 +624,18 @@ def render_position_total_value_chart(
                 alt.Tooltip("Market Value:Q", title="Market Value", format=",.2f"),
             ],
         ),
-        alt.Chart(labels)
-        .mark_text(align="left", baseline="middle", dx=6, fontSize=12)
-        .encode(
-            x=alt.X("Date:T", title="Date"),
-            y=alt.Y("Value:Q", title="Value (CAD)", scale=alt.Scale(zero=False)),
-            text="Label:N",
-            color=alt.Color(
-                "Label:N",
-                scale=alt.Scale(
-                    domain=[
-                        "Market Value",
-                        target_value_label,
-                        "Principal Value",
-                        "Comfort Zone +10%",
-                        "Comfort Zone -10%",
-                    ],
-                    range=[
-                        palette["actual"],
-                        palette["target_growth"],
-                        palette["cost_basis"],
-                        palette["comfort_label"],
-                        palette["comfort_label"],
-                    ],
-                ),
-                legend=None,
-            ),
-        ),
     ).resolve_scale(y="shared").properties(height=420)
 
     st.subheader("My VFV Position Value")
     st.altair_chart(chart, width="stretch")
+    chart_legend(
+        [
+            ("Market Value", palette["actual"]),
+            (target_value_label, palette["target_growth"]),
+            ("Principal Value", palette["cost_basis"]),
+            ("Comfort Zone", palette["comfort_label"]),
+        ]
+    )
 
 
 def render_position_value_chart(
@@ -659,33 +648,7 @@ def render_position_value_chart(
         return
 
     palette = chart_palette()
-    _, label_date = chart_label_dates(prices)
-    latest = position_data.iloc[-1]
     target_growth_label = f"Target Growth ({target_cagr:.1%} CAGR)"
-    labels = pd.DataFrame(
-        [
-            {
-                "Date": label_date,
-                "Value": latest["Actual Growth"],
-                "Label": "Actual Growth",
-            },
-            {
-                "Date": label_date,
-                "Value": latest["Target Growth"],
-                "Label": target_growth_label,
-            },
-            {
-                "Date": label_date,
-                "Value": latest["Comfort Zone High Growth"],
-                "Label": "Comfort Zone +10%",
-            },
-            {
-                "Date": label_date,
-                "Value": latest["Comfort Zone Low Growth"],
-                "Label": "Comfort Zone -10%",
-            },
-        ]
-    )
     chart = alt.layer(
         alt.Chart(position_data)
         .mark_area(color=palette["comfort_area"], opacity=0.22)
@@ -731,35 +694,17 @@ def render_position_value_chart(
                 alt.Tooltip("Actual Growth:Q", title="Actual Growth", format=",.2f"),
             ],
         ),
-        alt.Chart(labels)
-        .mark_text(align="left", baseline="middle", dx=6, fontSize=12)
-        .encode(
-            x=alt.X("Date:T", title="Date"),
-            y=alt.Y("Value:Q", title="Growth (CAD)", scale=alt.Scale(zero=False)),
-            text="Label:N",
-            color=alt.Color(
-                "Label:N",
-                scale=alt.Scale(
-                    domain=[
-                        "Actual Growth",
-                        target_growth_label,
-                        "Comfort Zone +10%",
-                        "Comfort Zone -10%",
-                    ],
-                    range=[
-                        palette["actual"],
-                        palette["target_growth"],
-                        palette["comfort_label"],
-                        palette["comfort_label"],
-                    ],
-                ),
-                legend=None,
-            ),
-        ),
     ).resolve_scale(y="shared").properties(height=420)
 
     st.subheader("My VFV Growth")
     st.altair_chart(chart, width="stretch")
+    chart_legend(
+        [
+            ("Actual Growth", palette["actual"]),
+            (target_growth_label, palette["target_growth"]),
+            ("Comfort Zone", palette["comfort_label"]),
+        ]
+    )
 
 
 def render_price_vs_cost_chart(
@@ -771,8 +716,6 @@ def render_price_vs_cost_chart(
     chart_data = prices[["price_date", "close"]].rename(
         columns={"price_date": "Date", "close": "Price"}
     )
-    _, label_date = chart_label_dates(prices)
-    latest_price = chart_data.iloc[-1]["Price"]
     layers = [
         alt.Chart(chart_data)
         .mark_line(color=palette["actual"], strokeWidth=2.5)
@@ -785,28 +728,6 @@ def render_price_vs_cost_chart(
             ],
         )
     ]
-    price_label = pd.DataFrame(
-        {
-            "Date": [label_date],
-            "Price": [latest_price],
-            "Label": ["Market Price"],
-        }
-    )
-    layers.append(
-        alt.Chart(price_label)
-        .mark_text(
-            align="left",
-            baseline="middle",
-            dx=6,
-            fontSize=12,
-            color=palette["actual"],
-        )
-        .encode(
-            x=alt.X("Date:T", title="Date"),
-            y=alt.Y("Price:Q", title="Price (CAD)", scale=alt.Scale(zero=False)),
-            text="Label:N",
-        )
-    )
 
     if average_cost is not None:
         layers.append(
@@ -821,28 +742,6 @@ def render_price_vs_cost_chart(
                         format=",.2f",
                     )
                 ],
-            )
-        )
-        cost_label = pd.DataFrame(
-            {
-                "Date": [label_date],
-                "Average Cost Basis": [average_cost],
-                "Label": ["Average Cost Basis"],
-            }
-        )
-        layers.append(
-            alt.Chart(cost_label)
-            .mark_text(
-                align="left",
-                baseline="middle",
-                dx=6,
-                fontSize=12,
-                color=palette["average_cost"],
-            )
-            .encode(
-                x=alt.X("Date:T", title="Date"),
-                y=alt.Y("Average Cost Basis:Q", scale=alt.Scale(zero=False)),
-                text="Label:N",
             )
         )
 
@@ -880,6 +779,12 @@ def render_price_vs_cost_chart(
         alt.layer(*layers).resolve_scale(y="shared").properties(height=420),
         width="stretch",
     )
+    legend_items = [("Market Price", palette["actual"])]
+    if average_cost is not None:
+        legend_items.append(("Average Cost Basis", palette["average_cost"]))
+    if not transactions.empty:
+        legend_items.append(("Purchases", "#f97316"))
+    chart_legend(legend_items)
 
 
 def transaction_cash_amount(row: Any) -> float:
@@ -958,7 +863,7 @@ def expected_distribution_dates(distributions: pd.DataFrame) -> tuple[str, str]:
     if distributions.empty:
         return "Not available", "Not available"
 
-    today = pd.Timestamp(date.today())
+    today = pd.Timestamp(pd.Timestamp.now(tz=VANCOUVER_TZ).date())
     future_ex = distributions[distributions["ex_dividend_date"] >= today]
     future_payment = distributions[distributions["payment_date"] >= today]
 
@@ -990,6 +895,65 @@ def latest_metric_row(frame: pd.DataFrame) -> pd.Series | None:
     return frame.sort_values("metric_date").iloc[-1]
 
 
+def metric_percent_label(row: pd.Series | None, column: str) -> str:
+    if row is None or pd.isna(row[column]):
+        return "Not set"
+    return f"{row[column]:.2%}"
+
+
+def metric_date_label(row: pd.Series | None) -> str:
+    if row is None:
+        return "Not set"
+    return row["metric_date"].date().isoformat()
+
+
+def highlighted_metric(label: str, value: str, detail: str | None = None) -> None:
+    detail_markup = (
+        f"""
+            <span style="
+                color: #92400e;
+                font-size: 0.95rem;
+                font-weight: 700;
+                margin-left: 0.5rem;
+                white-space: nowrap;
+            ">({escape(detail)})</span>
+        """
+        if detail
+        else ""
+    )
+    st.markdown(
+        f"""
+        <div style="
+            display: inline-block;
+            width: auto;
+            max-width: 100%;
+            border: 1px solid #f59e0b;
+            border-left: 6px solid #f59e0b;
+            background: #fffbeb;
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            min-height: 5.25rem;
+            margin-bottom: 0.75rem;
+        ">
+            <div style="
+                color: #92400e;
+                font-size: 0.875rem;
+                font-weight: 700;
+                margin-bottom: 0.35rem;
+            ">{escape(label)}</div>
+            <div style="
+                color: #7c2d12;
+                font-size: 2rem;
+                font-weight: 800;
+                line-height: 1.1;
+                overflow-wrap: anywhere;
+            ">{escape(value)}{detail_markup}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def yield_chart_data(yields: pd.DataFrame) -> pd.DataFrame:
     if yields.empty:
         return yields
@@ -1012,16 +976,6 @@ def render_cash_yield_chart(yields: pd.DataFrame) -> None:
         return
 
     palette = chart_palette()
-    _, label_date = chart_label_dates(chart_data.rename(columns={"metric_date": "price_date"}))
-    latest = chart_data.iloc[-1]
-    label = pd.DataFrame(
-        {
-            "Date": [label_date],
-            "Yield": [latest["12-Month Trailing Yield"]],
-            "Label": ["Derived 12-Month Distribution Yield"],
-        }
-    )
-
     chart = alt.layer(
         alt.Chart(chart_data)
         .mark_line(color=palette["actual"], strokeWidth=2.5, interpolate="step-after")
@@ -1042,23 +996,11 @@ def render_cash_yield_chart(yields: pd.DataFrame) -> None:
                 alt.Tooltip("source:N", title="Source"),
             ],
         ),
-        alt.Chart(label)
-        .mark_text(
-            align="left",
-            baseline="middle",
-            dx=6,
-            fontSize=12,
-            color=palette["actual"],
-        )
-        .encode(
-            x=alt.X("Date:T", title="Date"),
-            y=alt.Y("Yield:Q", title="Yield (%)", scale=alt.Scale(zero=False)),
-            text="Label:N",
-        ),
     ).resolve_scale(y="shared").properties(height=380)
 
     st.subheader("CASH.TO Derived 12-Month Distribution Yield")
     st.altair_chart(chart, width="stretch")
+    chart_legend([("Derived 12-Month Distribution Yield", palette["actual"])])
 
 
 def cash_dividend_data(transactions: pd.DataFrame) -> pd.DataFrame:
@@ -1136,6 +1078,12 @@ def render_cash_page(
     expected_ex_date, expected_payment_date = expected_distribution_dates(distributions)
 
     st.subheader("CASH.TO - Global X High Interest Savings ETF")
+    highlighted_metric(
+        "Annualized distribution yield",
+        metric_percent_label(latest_yield, "annualized_distribution_yield"),
+        f"Updated {metric_date_label(latest_yield)}",
+    )
+
     col1, col2, col3, col4 = st.columns(4)
     col1.metric(
         "Principal value",
@@ -1159,27 +1107,22 @@ def render_cash_page(
         f"{summary['gain_rate']:.2%}" if summary["gain_rate"] is not None else "Not set",
     )
 
-    col5, col6, col7 = st.columns(3)
+    col5, col6, col7, col8 = st.columns(4)
     col5.metric(
-        "12-month trailing yield",
-        (
-            f"{latest_yield['twelve_month_trailing_yield']:.2%}"
-            if latest_yield is not None
-            and pd.notna(latest_yield["twelve_month_trailing_yield"])
-            else "Not set"
-        ),
-        (
-            latest_yield["metric_date"].date().isoformat()
-            if latest_yield is not None
-            else None
-        ),
+        "Gross yield",
+        metric_percent_label(latest_yield, "gross_yield"),
     )
-    col6.metric("Expected ex-dividend date", expected_ex_date)
-    col7.metric("Expected payment date", expected_payment_date)
+    col6.metric(
+        "12-month trailing yield",
+        metric_percent_label(latest_yield, "twelve_month_trailing_yield"),
+    )
+    col7.metric("Expected ex-dividend date", expected_ex_date)
+    col8.metric("Expected payment date", expected_payment_date)
 
     st.caption(
-        "CASH.TO yield history uses official Global X observations when available. "
-        "Older backfill rows are derived from official distributions and market closes."
+        "Annualized distribution yield and gross yield are current official "
+        "Global X metrics. The historical chart uses 12-month trailing yield, "
+        "with older rows derived from distributions and market closes."
     )
 
     render_cash_yield_chart(yields)
