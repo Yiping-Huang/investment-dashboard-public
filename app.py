@@ -317,7 +317,7 @@ def load_latest_quote_snapshots(price_schema: str) -> pd.DataFrame:
         "latest_asset_quote_snapshots",
         (
             ("select", "symbol,snapshot_date,latest_close,volume,average_volume,pe_ratio,beta,expense_ratio,nav,market_cap,source,fetched_at"),
-            ("source", "eq.yahoo_quote"),
+            ("source", "eq.daily_prices_derived"),
             ("order", "symbol.asc"),
         ),
         supabase_auth_token(),
