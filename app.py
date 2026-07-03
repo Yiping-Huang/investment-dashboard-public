@@ -22,6 +22,14 @@ COMFORT_ZONE_MULTIPLIER = 0.10
 EMA_PERIODS = [8, 20, 50, 100, 200]
 EMA_HISTORY_DAYS = 420
 VANCOUVER_TZ = ZoneInfo("America/Vancouver")
+SECTION_OVERVIEW = "Overview"
+SECTION_ACCOUNTS_TAX = "Accounts and Tax"
+SECTION_GOALS = "Goals"
+SECTION_ALLOCATION = "Allocation"
+SECTION_PERFORMANCE_INCOME = "Performance and Income"
+SECTION_RISK_LIQUIDITY = "Risk and Liquidity"
+SECTION_HOLDINGS = "Holdings"
+SECTION_RESEARCH = "Research"
 PREFERRED_HOLDING_SYMBOLS = [DEFAULT_SYMBOL, "XEQT.TO", "QQC.TO", "CASH.TO", "QQQ"]
 HISTORY_WINDOW_OPTIONS = {
     "All Time": None,
@@ -38,6 +46,57 @@ HISTORY_WINDOW_OPTIONS = {
     "18 Months": 545,
     "2 Years": 730,
 }
+SECTION_SUBPAGES = {
+    SECTION_OVERVIEW: [
+        "Net Worth",
+        "Monthly Trend",
+        "Emergency Fund Progress",
+        "Asset Allocation",
+        "Tax Sheltered Allocation",
+    ],
+    SECTION_ACCOUNTS_TAX: [
+        "Account Allocation",
+        "Account Balances",
+        "TFSA Room",
+        "RRSP Room",
+        "Tax Advantaged Coverage",
+    ],
+    SECTION_GOALS: [
+        "Short-Term Goals",
+        "Mid-Term Goals",
+        "Long-Term Goals",
+    ],
+    SECTION_ALLOCATION: [
+        "Asset Class Allocation",
+        "Target vs Actual Allocation",
+        "Purpose Allocation",
+    ],
+    SECTION_PERFORMANCE_INCOME: [
+        "Income Summary",
+        "Principal vs Growth",
+        "Return vs Inflation",
+        "Yield Table",
+    ],
+    SECTION_RISK_LIQUIDITY: [
+        "Portfolio Characteristics",
+        "Liquidity Ladder",
+        "Risk Allocation",
+    ],
+    SECTION_RESEARCH: [
+        "Comparison",
+        "Watchlist",
+    ],
+}
+DASHBOARD_SECTIONS = [
+    SECTION_OVERVIEW,
+    SECTION_ACCOUNTS_TAX,
+    SECTION_GOALS,
+    SECTION_ALLOCATION,
+    SECTION_PERFORMANCE_INCOME,
+    SECTION_RISK_LIQUIDITY,
+    SECTION_HOLDINGS,
+    SECTION_RESEARCH,
+]
 
 
 def get_setting(name: str, default: str | None = None) -> str | None:
@@ -123,7 +182,10 @@ def require_supabase_auth() -> None:
     st.stop()
 
 
-def sidebar() -> None:
+def sidebar() -> str:
+    if st.session_state.get("dashboard_page") not in DASHBOARD_SECTIONS:
+        st.session_state["dashboard_page"] = SECTION_HOLDINGS
+
     st.markdown(
         """
         <style>
@@ -170,7 +232,17 @@ def sidebar() -> None:
 
     with st.sidebar:
         st.header("Dashboard")
-        st.button("Holdings", disabled=True, width="stretch", type="primary")
+        for section in DASHBOARD_SECTIONS:
+            is_active = st.session_state["dashboard_page"] == section
+            if st.button(
+                section,
+                key=f"nav_{section}",
+                disabled=is_active,
+                width="stretch",
+                type="primary" if is_active else "secondary",
+            ):
+                st.session_state["dashboard_page"] = section
+                st.rerun()
         with st.container(key="sidebar_auth_footer"):
             user_email = st.session_state.get("supabase_user_email")
             if user_email:
@@ -186,6 +258,8 @@ def sidebar() -> None:
                     st.session_state.pop("supabase_user_email", None)
                     fetch_table.clear()
                     st.rerun()
+
+    return st.session_state["dashboard_page"]
 
 
 @st.cache_data(ttl=300)
@@ -220,6 +294,52 @@ def load_assets(price_schema: str) -> pd.DataFrame:
         supabase_auth_token(),
     )
     return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=3600)
+def load_tracked_market_symbols(price_schema: str) -> pd.DataFrame:
+    rows = fetch_table(
+        price_schema,
+        "watchlist_symbols",
+        (
+            ("select", "symbol,name,asset_type,exchange,currency,yahoo_chart_symbol,twelve_data_symbol,active,notes,added_at,updated_at"),
+            ("active", "eq.true"),
+            ("order", "symbol.asc"),
+        ),
+        supabase_auth_token(),
+    )
+    return pd.DataFrame(rows)
+
+
+def load_latest_quote_snapshots(price_schema: str) -> pd.DataFrame:
+    rows = fetch_table(
+        price_schema,
+        "latest_asset_quote_snapshots",
+        (
+            ("select", "symbol,snapshot_date,latest_close,volume,average_volume,pe_ratio,beta,expense_ratio,nav,market_cap,source,fetched_at"),
+            ("source", "eq.yahoo_quote"),
+            ("order", "symbol.asc"),
+        ),
+        supabase_auth_token(),
+    )
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+
+    for column in [
+        "latest_close",
+        "volume",
+        "average_volume",
+        "pe_ratio",
+        "beta",
+        "expense_ratio",
+        "nav",
+        "market_cap",
+    ]:
+        if column in frame:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame["snapshot_date"] = pd.to_datetime(frame["snapshot_date"])
+    return frame
 
 
 def load_prices(price_schema: str, symbol: str, start_date: date) -> pd.DataFrame:
@@ -283,21 +403,19 @@ def load_positions(portfolio_schema: str, symbol: str) -> pd.DataFrame:
     return frame
 
 
-def load_transactions(portfolio_schema: str, symbol: str) -> pd.DataFrame:
+def load_transactions(portfolio_schema: str, symbol: str | None = None) -> pd.DataFrame:
     access_token = supabase_auth_token()
     if not access_token:
         raise RuntimeError("Sign in before reading portfolio data.")
 
-    rows = fetch_table(
-        portfolio_schema,
-        "transactions",
-        (
-            ("select", "id,symbol,account_id,transaction_date,transaction_type,quantity,price,fees,currency,notes,created_at"),
-            ("symbol", f"eq.{symbol}"),
-            ("order", "transaction_date.desc"),
-        ),
-        access_token,
-    )
+    params: list[tuple[str, str]] = [
+        ("select", "id,symbol,account_id,transaction_date,transaction_type,quantity,price,fees,currency,notes,created_at"),
+        ("order", "transaction_date.desc"),
+    ]
+    if symbol:
+        params.append(("symbol", f"eq.{symbol}"))
+
+    rows = fetch_table(portfolio_schema, "transactions", tuple(params), access_token)
     frame = pd.DataFrame(rows)
     if frame.empty:
         return frame
@@ -363,6 +481,21 @@ def holding_symbol_options(assets: pd.DataFrame) -> list[str]:
     ]
     remaining_symbols = sorted(
         symbol for symbol in symbols if symbol not in set(preferred_symbols)
+    )
+    return preferred_symbols + remaining_symbols
+
+
+def transaction_symbol_options(transactions: pd.DataFrame) -> list[str]:
+    if transactions.empty or "symbol" not in transactions:
+        return []
+
+    symbols = [str(symbol) for symbol in transactions["symbol"].dropna().tolist()]
+    available_symbols = set(symbols)
+    preferred_symbols = [
+        symbol for symbol in PREFERRED_HOLDING_SYMBOLS if symbol in available_symbols
+    ]
+    remaining_symbols = sorted(
+        symbol for symbol in available_symbols if symbol not in set(preferred_symbols)
     )
     return preferred_symbols + remaining_symbols
 
@@ -912,6 +1045,94 @@ def render_price_vs_cost_chart(
     chart_legend(legend_items)
 
 
+def format_optional_int(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "Not available"
+    return f"{float(value):,.0f}"
+
+
+def format_optional_number(value: Any, decimals: int = 2) -> str:
+    if value is None or pd.isna(value):
+        return "Not available"
+    return f"{float(value):,.{decimals}f}"
+
+
+def render_market_price_chart(symbol: str, prices: pd.DataFrame) -> None:
+    if prices.empty:
+        st.info(f"No price history found for {symbol}.")
+        return
+
+    palette = chart_palette()
+    chart_data = prices[["price_date", "close"]].rename(
+        columns={"price_date": "Date", "close": "Price"}
+    )
+    layers = [
+        alt.Chart(chart_data)
+        .mark_line(color=palette["actual"], strokeWidth=2.5)
+        .encode(
+            x=alt.X("Date:T", title="Date"),
+            y=alt.Y("Price:Q", title="Price (CAD)", scale=alt.Scale(zero=False)),
+            tooltip=[
+                alt.Tooltip("Date:T", title="Date"),
+                alt.Tooltip("Price:Q", title="Market Price", format=",.2f"),
+            ],
+        )
+    ]
+
+    ema_data = latest_ema_data(prices)
+    ema_color = alt.Color(
+        "Indicator:N",
+        scale=alt.Scale(
+            domain=[f"EMA{period}" for period in EMA_PERIODS],
+            range=[palette[f"ema{period}"] for period in EMA_PERIODS],
+        ),
+        legend=None,
+    )
+    if not ema_data.empty:
+        layers.append(
+            alt.Chart(ema_data)
+            .mark_rule(strokeWidth=1.8, strokeDash=[5, 4])
+            .encode(
+                y=alt.Y("Value:Q", scale=alt.Scale(zero=False)),
+                color=ema_color,
+                tooltip=[
+                    alt.Tooltip("Indicator:N", title="Indicator"),
+                    alt.Tooltip("Value:Q", title="Latest EMA", format=",.2f"),
+                    alt.Tooltip("Date:T", title="As of"),
+                ],
+            )
+        )
+        layers.append(
+            alt.Chart(ema_data)
+            .mark_text(
+                align="right",
+                baseline="bottom",
+                dx=-6,
+                dy=-5,
+                fontSize=11,
+                fontWeight="bold",
+            )
+            .encode(
+                x=alt.X("Date:T", title="Date"),
+                y=alt.Y("Value:Q", scale=alt.Scale(zero=False)),
+                text="Label:N",
+                color=ema_color,
+            )
+        )
+
+    st.subheader(f"{symbol} Price")
+    st.altair_chart(
+        alt.layer(*layers).resolve_scale(y="shared").properties(height=420),
+        width="stretch",
+    )
+    legend_items = [("Market Price", palette["actual"])]
+    ema_indicators = set(ema_data["Indicator"]) if not ema_data.empty else set()
+    for period in EMA_PERIODS:
+        if f"EMA{period}" in ema_indicators:
+            legend_items.append((f"EMA{period}", palette[f"ema{period}"]))
+    chart_legend(legend_items)
+
+
 def transaction_cash_amount(row: Any) -> float:
     quantity = 0 if pd.isna(row.quantity) else float(row.quantity or 0)
     price = 0 if pd.isna(row.price) else float(row.price or 0)
@@ -1385,35 +1606,115 @@ def render_asset_page(
         st.dataframe(display_prices, width="stretch", hide_index=True)
 
 
-def main() -> None:
-    st.set_page_config(
-        page_title="Investment Dashboard",
-        page_icon="",
-        layout="wide",
-    )
-    require_supabase_auth()
-    sidebar()
-
-    st.title("Investment Dashboard")
-    price_schema = get_setting("SUPABASE_PRICE_SCHEMA", DEFAULT_PRICE_SCHEMA)
-    portfolio_schema = get_setting(
-        "SUPABASE_PORTFOLIO_SCHEMA", DEFAULT_PORTFOLIO_SCHEMA
-    )
-
+def render_market_research_page(price_schema: str) -> None:
     try:
-        assets = load_assets(price_schema)
+        tracked = load_tracked_market_symbols(price_schema)
+        quote_snapshots = load_latest_quote_snapshots(price_schema)
+    except RuntimeError as error:
+        st.error(str(error))
+        return
+
+    if tracked.empty:
+        st.warning("No tracked market symbols found.")
+        return
+
+    tracked = tracked.sort_values("symbol")
+    symbol_by_label = {
+        f"{row.symbol} - {row.name}": row.symbol for row in tracked.itertuples()
+    }
+    selected_label = st.selectbox("Symbol", list(symbol_by_label.keys()))
+    symbol = symbol_by_label[selected_label]
+    metadata = tracked[tracked["symbol"] == symbol].iloc[0]
+
+    start_date = date.today() - timedelta(days=EMA_HISTORY_DAYS)
+    try:
+        prices = load_prices(price_schema, symbol, start_date)
+    except RuntimeError as error:
+        st.error(str(error))
+        return
+
+    st.subheader(f"{symbol} - {metadata.get('name', symbol)}")
+    if prices.empty:
+        st.info(
+            f"No price rows found for {symbol}. Run backfill_recent_prices.py for this symbol."
+        )
+        return
+
+    latest = prices.iloc[-1]
+    quote_snapshot = quote_snapshots[quote_snapshots["symbol"] == symbol]
+    quote_row = quote_snapshot.iloc[0] if not quote_snapshot.empty else None
+
+    latest_close = (
+        float(quote_row["latest_close"])
+        if quote_row is not None and not pd.isna(quote_row["latest_close"])
+        else float(latest["close"])
+    )
+    latest_date = latest["price_date"].date().isoformat()
+    latest_volume = (
+        quote_row["volume"]
+        if quote_row is not None and "volume" in quote_row and not pd.isna(quote_row["volume"])
+        else latest["volume"] if "volume" in latest else None
+    )
+    average_volume = (
+        quote_row["average_volume"]
+        if quote_row is not None
+        and "average_volume" in quote_row
+        and not pd.isna(quote_row["average_volume"])
+        else prices["volume"].dropna().tail(20).mean()
+    )
+    pe_ratio = quote_row["pe_ratio"] if quote_row is not None else None
+    beta = quote_row["beta"] if quote_row is not None else None
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Latest close", f"{latest_close:,.2f}", latest_date)
+    col2.metric("Volume", format_optional_int(latest_volume))
+    col3.metric("Avg volume", format_optional_int(average_volume))
+    col4.metric("PE", format_optional_number(pe_ratio))
+    col5.metric("Beta", format_optional_number(beta))
+    st.caption(
+        "Quote metrics come from the latest market.asset_quote_snapshots row when "
+        "available. Daily price rows are used as fallback for close and volume."
+    )
+
+    render_market_price_chart(symbol, prices)
+
+
+def render_placeholder_section(section: str, price_schema: str | None = None) -> None:
+    subpages = SECTION_SUBPAGES[section]
+    selected_subpage = st.segmented_control(
+        "View",
+        subpages,
+        default=subpages[0],
+        key=f"subpage_{section}",
+    )
+    if not selected_subpage:
+        st.stop()
+
+    if section == SECTION_RESEARCH and selected_subpage == "Watchlist":
+        if price_schema is None:
+            st.stop()
+        render_market_research_page(price_schema)
+        return
+
+    st.subheader(selected_subpage)
+    st.info("Placeholder. This dashboard section is ready for future data and charts.")
+
+
+def render_holdings_section(
+    price_schema: str,
+    portfolio_schema: str,
+    assets: pd.DataFrame,
+) -> None:
+    st.subheader("Holdings")
+    try:
+        all_transactions = load_transactions(portfolio_schema)
     except RuntimeError as error:
         st.error(str(error))
         st.stop()
 
-    if assets.empty:
-        st.warning("No assets found in Supabase.")
-        st.stop()
-
-    st.subheader("Holdings")
-    holding_symbols = holding_symbol_options(assets)
+    holding_symbols = transaction_symbol_options(all_transactions)
     if not holding_symbols:
-        st.warning("No assets found in Supabase.")
+        st.info("No transaction history found yet.")
         st.stop()
 
     selected_symbol = st.segmented_control(
@@ -1456,6 +1757,41 @@ def main() -> None:
             show_rows,
             selected_symbol,
         )
+
+
+def main() -> None:
+    st.set_page_config(
+        page_title="Investment Dashboard",
+        page_icon="",
+        layout="wide",
+    )
+    require_supabase_auth()
+    section = sidebar()
+
+    st.title("Investment Dashboard")
+    price_schema = get_setting("SUPABASE_PRICE_SCHEMA", DEFAULT_PRICE_SCHEMA)
+    portfolio_schema = get_setting(
+        "SUPABASE_PORTFOLIO_SCHEMA", DEFAULT_PORTFOLIO_SCHEMA
+    )
+
+    if section in SECTION_SUBPAGES:
+        render_placeholder_section(section, price_schema)
+        return
+
+    if section != SECTION_HOLDINGS:
+        st.stop()
+
+    try:
+        assets = load_assets(price_schema)
+    except RuntimeError as error:
+        st.error(str(error))
+        st.stop()
+
+    if assets.empty:
+        st.warning("No assets found in Supabase.")
+        st.stop()
+
+    render_holdings_section(price_schema, portfolio_schema, assets)
 
 
 if __name__ == "__main__":
