@@ -22,7 +22,7 @@ COMFORT_ZONE_MULTIPLIER = 0.10
 EMA_PERIODS = [8, 20, 50, 100, 200]
 EMA_HISTORY_DAYS = 420
 VANCOUVER_TZ = ZoneInfo("America/Vancouver")
-PREFERRED_HOLDING_SYMBOLS = [DEFAULT_SYMBOL, "CASH.TO", "QQQ"]
+PREFERRED_HOLDING_SYMBOLS = [DEFAULT_SYMBOL, "XEQT.TO", "QQC.TO", "CASH.TO", "QQQ"]
 HISTORY_WINDOW_OPTIONS = {
     "All Time": None,
     "1 Week": 7,
@@ -1367,9 +1367,9 @@ def render_asset_page(
         f"{total_return_pct:.2%}" if total_return_pct is not None else None,
     )
 
-    render_position_total_value_chart(display_prices, transactions, target_cagr)
-    render_position_value_chart(display_prices, transactions, target_cagr)
     render_price_vs_cost_chart(display_prices, average_cost, transactions, prices)
+    render_position_value_chart(display_prices, transactions, target_cagr)
+    render_position_total_value_chart(display_prices, transactions, target_cagr)
 
     if not transactions.empty:
         st.subheader("Transaction History")
