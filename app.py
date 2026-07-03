@@ -302,7 +302,7 @@ def load_tracked_market_symbols(price_schema: str) -> pd.DataFrame:
         price_schema,
         "watchlist_symbols",
         (
-            ("select", "symbol,name,asset_type,exchange,currency,yahoo_chart_symbol,twelve_data_symbol,active,notes,added_at,updated_at"),
+            ("select", "symbol,name,asset_type,exchange,currency,yahoo_chart_symbol,twelve_data_symbol,manual_pe_ratio,manual_pe_updated_on,manual_pe_source,manual_pe_notes,active,notes,added_at,updated_at"),
             ("active", "eq.true"),
             ("order", "symbol.asc"),
         ),
@@ -1057,6 +1057,12 @@ def format_optional_number(value: Any, decimals: int = 2) -> str:
     return f"{float(value):,.{decimals}f}"
 
 
+def format_optional_date(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "Date not recorded"
+    return pd.to_datetime(value).date().isoformat()
+
+
 def render_market_price_chart(symbol: str, prices: pd.DataFrame) -> None:
     if prices.empty:
         st.info(f"No price history found for {symbol}.")
@@ -1131,6 +1137,179 @@ def render_market_price_chart(symbol: str, prices: pd.DataFrame) -> None:
         if f"EMA{period}" in ema_indicators:
             legend_items.append((f"EMA{period}", palette[f"ema{period}"]))
     chart_legend(legend_items)
+
+
+def comparison_price_data(
+    price_schema: str,
+    symbols: list[str],
+    start_date: date,
+    mode: str,
+    rolling_window: int,
+) -> pd.DataFrame:
+    frames = []
+    for symbol in symbols:
+        prices = load_prices(price_schema, symbol, start_date)
+        if prices.empty:
+            continue
+        prices = prices[["price_date", "close"]].dropna().sort_values("price_date")
+        if prices.empty:
+            continue
+
+        prices = prices.rename(columns={"price_date": "Date", "close": "Close"})
+        prices["Symbol"] = symbol
+        if mode == "Normalized":
+            base_price = float(prices.iloc[0]["Close"])
+            if not base_price:
+                continue
+            prices["Value"] = prices["Close"] / base_price * 100
+        elif mode == "Price":
+            prices["Value"] = prices["Close"]
+        elif mode == "Drawdown":
+            prices["Value"] = (prices["Close"] / prices["Close"].cummax() - 1) * 100
+        elif mode == "Rolling Return":
+            prices["Value"] = prices["Close"].pct_change(periods=rolling_window) * 100
+        elif mode == "Rolling Volatility":
+            prices["Value"] = (
+                prices["Close"].pct_change().rolling(rolling_window).std()
+                * (252**0.5)
+                * 100
+            )
+        prices = prices.dropna(subset=["Value"])
+        if prices.empty:
+            continue
+        frames.append(prices)
+
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def comparison_axis_title(mode: str, rolling_window: int) -> str:
+    if mode == "Normalized":
+        return "Indexed Growth (Start = 100)"
+    if mode == "Price":
+        return "Price (CAD)"
+    if mode == "Drawdown":
+        return "Drawdown (%)"
+    if mode == "Rolling Return":
+        return f"{rolling_window}-Day Rolling Return (%)"
+    return f"{rolling_window}-Day Annualized Volatility (%)"
+
+
+def render_research_comparison_page(price_schema: str) -> None:
+    try:
+        tracked = load_tracked_market_symbols(price_schema)
+    except RuntimeError as error:
+        st.error(str(error))
+        return
+
+    if tracked.empty:
+        st.warning("No tracked market symbols found.")
+        return
+
+    tracked = tracked.sort_values("symbol")
+    symbols = tracked["symbol"].dropna().astype(str).tolist()
+    default_symbols = [
+        symbol
+        for symbol in ["QQC.TO", "XEQT.TO", "VFV.TO"]
+        if symbol in set(symbols)
+    ]
+
+    controls_col1, controls_col2, controls_col3 = st.columns([2, 1, 1])
+    with controls_col1:
+        selected_symbols = st.multiselect(
+            "Compare",
+            symbols,
+            default=default_symbols,
+        )
+    with controls_col2:
+        history_window_label = st.selectbox(
+            "History window",
+            list(HISTORY_WINDOW_OPTIONS.keys()),
+            index=list(HISTORY_WINDOW_OPTIONS.keys()).index("1 Year"),
+            key="research_comparison_history",
+        )
+    with controls_col3:
+        mode = st.selectbox(
+            "Mode",
+            [
+                "Normalized",
+                "Price",
+                "Drawdown",
+                "Rolling Return",
+                "Rolling Volatility",
+            ],
+            key="research_comparison_mode",
+        )
+
+    if len(selected_symbols) < 2:
+        st.info("Select at least two symbols to compare.")
+        return
+
+    rolling_window = 20
+    if mode in {"Rolling Return", "Rolling Volatility"}:
+        rolling_window = st.number_input(
+            "Rolling window",
+            min_value=5,
+            max_value=252,
+            value=20,
+            step=5,
+            key="research_comparison_rolling_window",
+        )
+
+    lookback_days = HISTORY_WINDOW_OPTIONS[history_window_label]
+    start_date = (
+        date(1900, 1, 1)
+        if lookback_days is None
+        else date.today() - timedelta(days=lookback_days)
+    )
+
+    try:
+        chart_data = comparison_price_data(
+            price_schema,
+            selected_symbols,
+            start_date,
+            mode,
+            int(rolling_window),
+        )
+    except RuntimeError as error:
+        st.error(str(error))
+        return
+
+    if chart_data.empty:
+        st.info("No comparable price history found for the selected symbols.")
+        return
+
+    y_title = comparison_axis_title(mode, int(rolling_window))
+    st.subheader(f"{mode} Comparison")
+    chart = (
+        alt.Chart(chart_data)
+        .mark_line(strokeWidth=2.4)
+        .encode(
+            x=alt.X("Date:T", title="Date"),
+            y=alt.Y(
+                "Value:Q",
+                title=y_title,
+                scale=alt.Scale(zero=False),
+            ),
+            color=alt.Color("Symbol:N", title=None),
+            tooltip=[
+                alt.Tooltip("Date:T", title="Date"),
+                alt.Tooltip("Symbol:N", title="Symbol"),
+                alt.Tooltip("Close:Q", title="Close", format=",.2f"),
+                alt.Tooltip("Value:Q", title=y_title, format=",.2f"),
+            ],
+        )
+        .properties(height=460)
+    )
+    st.altair_chart(chart, width="stretch")
+    if mode == "Normalized":
+        st.caption(
+            "Each selected symbol starts at 100 on its first available close in the "
+            "selected window, so the lines show relative growth rather than raw price."
+        )
+    elif mode == "Rolling Volatility":
+        st.caption("Rolling volatility is annualized from daily close-to-close returns.")
 
 
 def transaction_cash_amount(row: Any) -> float:
@@ -1619,11 +1798,8 @@ def render_market_research_page(price_schema: str) -> None:
         return
 
     tracked = tracked.sort_values("symbol")
-    symbol_by_label = {
-        f"{row.symbol} - {row.name}": row.symbol for row in tracked.itertuples()
-    }
-    selected_label = st.selectbox("Symbol", list(symbol_by_label.keys()))
-    symbol = symbol_by_label[selected_label]
+    symbols = tracked["symbol"].dropna().astype(str).tolist()
+    symbol = st.selectbox("Symbol", symbols)
     metadata = tracked[tracked["symbol"] == symbol].iloc[0]
 
     start_date = date.today() - timedelta(days=EMA_HISTORY_DAYS)
@@ -1662,7 +1838,13 @@ def render_market_research_page(price_schema: str) -> None:
         and not pd.isna(quote_row["average_volume"])
         else prices["volume"].dropna().tail(20).mean()
     )
-    pe_ratio = quote_row["pe_ratio"] if quote_row is not None else None
+    manual_pe_ratio = metadata.get("manual_pe_ratio")
+    pe_ratio = (
+        manual_pe_ratio
+        if manual_pe_ratio is not None and not pd.isna(manual_pe_ratio)
+        else quote_row["pe_ratio"] if quote_row is not None else None
+    )
+    pe_updated_on = metadata.get("manual_pe_updated_on")
     beta = quote_row["beta"] if quote_row is not None else None
 
     col1, col2, col3, col4, col5 = st.columns(5)
@@ -1671,9 +1853,11 @@ def render_market_research_page(price_schema: str) -> None:
     col3.metric("Avg volume", format_optional_int(average_volume))
     col4.metric("PE", format_optional_number(pe_ratio))
     col5.metric("Beta", format_optional_number(beta))
+    col4.caption(f"Manual update: {format_optional_date(pe_updated_on)}")
     st.caption(
         "Quote metrics come from the latest market.asset_quote_snapshots row when "
-        "available. Daily price rows are used as fallback for close and volume."
+        "available. Daily price rows are used as fallback for close and volume. "
+        "PE is manually maintained on the watchlist."
     )
 
     render_market_price_chart(symbol, prices)
@@ -1689,6 +1873,12 @@ def render_placeholder_section(section: str, price_schema: str | None = None) ->
     )
     if not selected_subpage:
         st.stop()
+
+    if section == SECTION_RESEARCH and selected_subpage == "Comparison":
+        if price_schema is None:
+            st.stop()
+        render_research_comparison_page(price_schema)
+        return
 
     if section == SECTION_RESEARCH and selected_subpage == "Watchlist":
         if price_schema is None:
