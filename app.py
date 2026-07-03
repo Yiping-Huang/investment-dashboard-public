@@ -19,8 +19,9 @@ DEFAULT_PORTFOLIO_SCHEMA = "portfolio"
 DEFAULT_SYMBOL = "VFV.TO"
 DEFAULT_TARGET_CAGR = 0.10
 COMFORT_ZONE_MULTIPLIER = 0.10
+EMA_PERIODS = [8, 20, 50, 100, 200]
+EMA_HISTORY_DAYS = 420
 VANCOUVER_TZ = ZoneInfo("America/Vancouver")
-TARGET_PRICE_PATH_START_DATE = date(2026, 4, 15)
 PREFERRED_HOLDING_SYMBOLS = [DEFAULT_SYMBOL, "CASH.TO", "QQQ"]
 HISTORY_WINDOW_OPTIONS = {
     "All Time": None,
@@ -471,33 +472,25 @@ def position_value_data(
     return pd.DataFrame(rows)
 
 
-def target_price_path_data(prices: pd.DataFrame, target_cagr: float) -> pd.DataFrame:
+def latest_ema_data(prices: pd.DataFrame) -> pd.DataFrame:
     if prices.empty:
         return pd.DataFrame()
 
-    start_timestamp = pd.Timestamp(TARGET_PRICE_PATH_START_DATE)
-    path_prices = prices[prices["price_date"] >= start_timestamp].copy()
-    if path_prices.empty:
-        return pd.DataFrame()
-
-    path_prices = path_prices.sort_values("price_date")
-    start_row = path_prices.iloc[0]
-    start_date = start_row["price_date"].normalize()
-    start_price = float(start_row["close"])
-
+    close_prices = prices[["price_date", "close"]].dropna().sort_values("price_date")
     rows: list[dict[str, Any]] = []
-    for price_row in path_prices.itertuples():
-        price_date = price_row.price_date.normalize()
-        elapsed_days = (price_date - start_date).days
-        expected_price = start_price * ((1 + target_cagr) ** (elapsed_days / 365))
+    latest_date = close_prices["price_date"].max()
+    for period in EMA_PERIODS:
+        if len(close_prices) < period:
+            continue
+        ema_value = float(
+            close_prices["close"].ewm(span=period, adjust=False).mean().iloc[-1]
+        )
         rows.append(
             {
-                "Date": price_date,
-                "Expected Growth Path": expected_price,
-                "Comfort Zone Low": expected_price
-                * (1 - COMFORT_ZONE_MULTIPLIER),
-                "Comfort Zone High": expected_price
-                * (1 + COMFORT_ZONE_MULTIPLIER),
+                "Date": latest_date,
+                "Indicator": f"EMA{period}",
+                "Value": ema_value,
+                "Label": f"EMA{period} {ema_value:,.2f}",
             }
         )
 
@@ -521,6 +514,11 @@ def chart_palette() -> dict[str, str]:
             "target_growth": "#22c55e",
             "comfort_area": "#64748b",
             "comfort_label": "#cbd5e1",
+            "ema8": "#a78bfa",
+            "ema20": "#2dd4bf",
+            "ema50": "#facc15",
+            "ema100": "#fb923c",
+            "ema200": "#e879f9",
         }
     return {
         "actual": "#2563eb",
@@ -529,6 +527,11 @@ def chart_palette() -> dict[str, str]:
         "target_growth": "#16a34a",
         "comfort_area": "#64748b",
         "comfort_label": "#111827",
+        "ema8": "#7c3aed",
+        "ema20": "#0f766e",
+        "ema50": "#ca8a04",
+        "ema100": "#ea580c",
+        "ema200": "#c026d3",
     }
 
 
@@ -744,67 +747,14 @@ def render_position_value_chart(
 def render_price_vs_cost_chart(
     prices: pd.DataFrame,
     average_cost: float | None,
-    target_cagr: float,
     transactions: pd.DataFrame,
+    ema_prices: pd.DataFrame | None = None,
 ) -> None:
     palette = chart_palette()
     chart_data = prices[["price_date", "close"]].rename(
         columns={"price_date": "Date", "close": "Price"}
     )
-    target_path = target_price_path_data(prices, target_cagr)
-    expected_path_label = f"Expected Growth Path ({target_cagr:.1%} CAGR)"
     layers = []
-    if not target_path.empty:
-        layers.append(
-            alt.Chart(target_path)
-            .mark_area(color=palette["comfort_area"], opacity=0.22)
-            .encode(
-                x=alt.X("Date:T", title="Date"),
-                y=alt.Y(
-                    "Comfort Zone Low:Q",
-                    title="Price (CAD)",
-                    scale=alt.Scale(zero=False),
-                ),
-                y2="Comfort Zone High:Q",
-                tooltip=[
-                    alt.Tooltip("Date:T", title="Date"),
-                    alt.Tooltip(
-                        "Comfort Zone Low:Q",
-                        title="Comfort Zone -10%",
-                        format=",.2f",
-                    ),
-                    alt.Tooltip(
-                        "Comfort Zone High:Q",
-                        title="Comfort Zone +10%",
-                        format=",.2f",
-                    ),
-                ],
-            )
-        )
-        layers.append(
-            alt.Chart(target_path)
-            .mark_line(
-                color=palette["target_growth"],
-                strokeDash=[7, 5],
-                strokeWidth=2.5,
-            )
-            .encode(
-                x=alt.X("Date:T", title="Date"),
-                y=alt.Y(
-                    "Expected Growth Path:Q",
-                    title="Price (CAD)",
-                    scale=alt.Scale(zero=False),
-                ),
-                tooltip=[
-                    alt.Tooltip("Date:T", title="Date"),
-                    alt.Tooltip(
-                        "Expected Growth Path:Q",
-                        title=expected_path_label,
-                        format=",.2f",
-                    ),
-                ],
-            )
-        )
     layers.append(
         alt.Chart(chart_data)
         .mark_line(color=palette["actual"], strokeWidth=2.5)
@@ -817,6 +767,47 @@ def render_price_vs_cost_chart(
             ],
         )
     )
+
+    ema_data = latest_ema_data(ema_prices if ema_prices is not None else prices)
+    ema_color = alt.Color(
+        "Indicator:N",
+        scale=alt.Scale(
+            domain=[f"EMA{period}" for period in EMA_PERIODS],
+            range=[palette[f"ema{period}"] for period in EMA_PERIODS],
+        ),
+        legend=None,
+    )
+    if not ema_data.empty:
+        layers.append(
+            alt.Chart(ema_data)
+            .mark_rule(strokeWidth=1.8, strokeDash=[5, 4])
+            .encode(
+                y=alt.Y("Value:Q", scale=alt.Scale(zero=False)),
+                color=ema_color,
+                tooltip=[
+                    alt.Tooltip("Indicator:N", title="Indicator"),
+                    alt.Tooltip("Value:Q", title="Latest EMA", format=",.2f"),
+                    alt.Tooltip("Date:T", title="As of"),
+                ],
+            )
+        )
+        layers.append(
+            alt.Chart(ema_data)
+            .mark_text(
+                align="right",
+                baseline="bottom",
+                dx=-6,
+                dy=-5,
+                fontSize=11,
+                fontWeight="bold",
+            )
+            .encode(
+                x=alt.X("Date:T", title="Date"),
+                y=alt.Y("Value:Q", scale=alt.Scale(zero=False)),
+                text="Label:N",
+                color=ema_color,
+            )
+        )
 
     if average_cost is not None:
         layers.append(
@@ -910,9 +901,10 @@ def render_price_vs_cost_chart(
         width="stretch",
     )
     legend_items = [("Market Price", palette["actual"])]
-    if not target_path.empty:
-        legend_items.append((expected_path_label, palette["target_growth"]))
-        legend_items.append(("Comfort Zone (+/-10%)", palette["comfort_label"]))
+    ema_indicators = set(ema_data["Indicator"]) if not ema_data.empty else set()
+    for period in EMA_PERIODS:
+        if f"EMA{period}" in ema_indicators:
+            legend_items.append((f"EMA{period}", palette[f"ema{period}"]))
     if average_cost is not None:
         legend_items.append(("Average Cost Basis", palette["average_cost"]))
     if not transactions.empty:
@@ -1289,11 +1281,12 @@ def render_asset_page(
         st.stop()
 
     selected_asset = matching_assets.iloc[0].to_dict()
-    start_date = (
+    display_start_date = (
         date(1900, 1, 1)
         if lookback_days is None
         else date.today() - timedelta(days=lookback_days)
     )
+    start_date = min(display_start_date, date.today() - timedelta(days=EMA_HISTORY_DAYS))
 
     try:
         prices = load_prices(price_schema, symbol, start_date)
@@ -1310,6 +1303,14 @@ def render_asset_page(
     if prices.empty:
         st.warning(f"No price rows found for {symbol}.")
         st.stop()
+
+    display_prices = (
+        prices
+        if lookback_days is None
+        else prices[prices["price_date"] >= pd.Timestamp(display_start_date)]
+    )
+    if display_prices.empty:
+        display_prices = prices
 
     average_cost, total_quantity = weighted_average_cost_from_transactions(transactions)
     if average_cost is None:
@@ -1366,9 +1367,9 @@ def render_asset_page(
         f"{total_return_pct:.2%}" if total_return_pct is not None else None,
     )
 
-    render_position_total_value_chart(prices, transactions, target_cagr)
-    render_position_value_chart(prices, transactions, target_cagr)
-    render_price_vs_cost_chart(prices, average_cost, target_cagr, transactions)
+    render_position_total_value_chart(display_prices, transactions, target_cagr)
+    render_position_value_chart(display_prices, transactions, target_cagr)
+    render_price_vs_cost_chart(display_prices, average_cost, transactions, prices)
 
     if not transactions.empty:
         st.subheader("Transaction History")
@@ -1381,7 +1382,7 @@ def render_asset_page(
 
     if show_rows:
         st.subheader("Price Rows")
-        st.dataframe(prices, width="stretch", hide_index=True)
+        st.dataframe(display_prices, width="stretch", hide_index=True)
 
 
 def main() -> None:
