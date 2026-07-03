@@ -1171,6 +1171,52 @@ def render_market_price_chart(symbol: str, prices: pd.DataFrame) -> None:
     chart_legend(legend_items)
 
 
+def render_average_volume_chart(
+    symbol: str,
+    prices: pd.DataFrame,
+    window: int = 20,
+) -> None:
+    if prices.empty or "volume" not in prices:
+        return
+
+    chart_data = (
+        prices[["price_date", "volume"]]
+        .dropna()
+        .sort_values("price_date")
+        .rename(columns={"price_date": "Date", "volume": "Volume"})
+    )
+    if chart_data.empty:
+        return
+
+    chart_data["Average Volume"] = (
+        chart_data["Volume"].rolling(window, min_periods=1).mean()
+    )
+    chart = (
+        alt.Chart(chart_data)
+        .mark_line(color="#0f766e", strokeWidth=2.4)
+        .encode(
+            x=alt.X("Date:T", title="Date"),
+            y=alt.Y(
+                "Average Volume:Q",
+                title=f"{window}-Day Average Volume (units)",
+                scale=alt.Scale(zero=False),
+            ),
+            tooltip=[
+                alt.Tooltip("Date:T", title="Date"),
+                alt.Tooltip("Volume:Q", title="Volume", format=",.0f"),
+                alt.Tooltip(
+                    "Average Volume:Q",
+                    title=f"{window}-Day Avg Volume",
+                    format=",.0f",
+                ),
+            ],
+        )
+        .properties(height=280)
+    )
+    st.subheader(f"{symbol} Average Volume")
+    st.altair_chart(chart, width="stretch")
+
+
 def comparison_price_data(
     price_schema: str,
     symbols: list[str],
@@ -1218,6 +1264,7 @@ def comparison_price_data(
 
 def comparison_volume_data(
     price_schema: str,
+    tracked: pd.DataFrame,
     symbols: list[str],
     start_date: date,
     mode: str,
@@ -1227,22 +1274,71 @@ def comparison_volume_data(
         prices = load_prices(price_schema, symbol, start_date)
         if prices.empty or "volume" not in prices:
             continue
-        prices = prices[["price_date", "volume"]].dropna().sort_values("price_date")
+        required_columns = ["price_date", "open", "high", "low", "close", "volume"]
+        prices = prices[[column for column in required_columns if column in prices]]
+        prices = prices.dropna(subset=["price_date", "volume"]).sort_values("price_date")
         if prices.empty:
             continue
 
         prices = prices.rename(columns={"price_date": "Date", "volume": "Volume"})
         prices["Symbol"] = symbol
-        prices["Value"] = (
-            prices["Volume"].rolling(20, min_periods=1).mean()
-            if mode == "Average Volume"
-            else prices["Volume"]
-        )
+        if mode == "Average USD Volume":
+            metadata_match = tracked[tracked["symbol"] == symbol]
+            currency = (
+                metadata_match.iloc[0].get("currency")
+                if not metadata_match.empty
+                else "USD"
+            )
+            fx_rate = fetch_fx_rate_to_usd(currency)
+            if fx_rate is None:
+                continue
+            ohlc_columns = [
+                column for column in ["open", "high", "low", "close"] if column in prices
+            ]
+            prices["Average Price"] = prices[ohlc_columns].mean(axis=1, skipna=True)
+            prices["USD Dollar Volume"] = prices["Average Price"] * prices["Volume"] * fx_rate
+            prices["Value"] = prices["USD Dollar Volume"].rolling(20, min_periods=1).mean()
+        else:
+            prices["Value"] = (
+                prices["Volume"].rolling(20, min_periods=1).mean()
+                if mode == "Average Volume"
+                else prices["Volume"]
+            )
         frames.append(prices)
 
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
+
+
+@st.cache_data(ttl=3600)
+def fetch_fx_rate_to_usd(currency: str | None) -> float | None:
+    currency_code = (currency or "USD").strip().upper()
+    if currency_code == "USD":
+        return 1.0
+
+    response = requests.get(
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{currency_code}USD=X",
+        params={"range": "5d", "interval": "1d"},
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=10,
+    )
+    if response.status_code >= 400:
+        return None
+
+    payload = response.json()
+    results = (payload.get("chart") or {}).get("result") or []
+    if not results:
+        return None
+
+    close_values = (
+        ((results[0].get("indicators") or {}).get("quote") or [{}])[0].get("close")
+        or []
+    )
+    rates = pd.to_numeric(pd.Series(close_values), errors="coerce").dropna()
+    if rates.empty:
+        return None
+    return float(rates.iloc[-1])
 
 
 def latest_comparison_metrics(
@@ -1285,6 +1381,8 @@ def comparison_axis_title(mode: str, rolling_window: int) -> str:
         return "Volume (units)"
     if mode == "Average Volume":
         return "20-Day Average Volume (units)"
+    if mode == "Average USD Volume":
+        return "20-Day Average USD Volume"
     if mode == "PE":
         return "PE"
     if mode == "Beta":
@@ -1338,6 +1436,7 @@ def render_research_comparison_page(price_schema: str) -> None:
                 "Price",
                 "Volume",
                 "Average Volume",
+                "Average USD Volume",
                 "PE",
                 "Beta",
                 "Drawdown",
@@ -1370,9 +1469,10 @@ def render_research_comparison_page(price_schema: str) -> None:
     )
 
     try:
-        if mode in {"Volume", "Average Volume"}:
+        if mode in {"Volume", "Average Volume", "Average USD Volume"}:
             chart_data = comparison_volume_data(
                 price_schema,
+                tracked,
                 selected_symbols,
                 start_date,
                 mode,
@@ -1427,6 +1527,10 @@ def render_research_comparison_page(price_schema: str) -> None:
             tooltip.insert(2, alt.Tooltip("Close:Q", title="Close", format=",.2f"))
         if "Volume" in chart_data:
             tooltip.insert(2, alt.Tooltip("Volume:Q", title="Volume", format=",.0f"))
+        if "Average Price" in chart_data:
+            tooltip.insert(3, alt.Tooltip("Average Price:Q", title="Average Price", format=",.2f"))
+        if "USD Dollar Volume" in chart_data:
+            tooltip.insert(4, alt.Tooltip("USD Dollar Volume:Q", title="USD Volume", format=",.0f"))
         chart = (
             alt.Chart(chart_data)
             .mark_line(strokeWidth=2.4)
@@ -1450,6 +1554,11 @@ def render_research_comparison_page(price_schema: str) -> None:
         )
     elif mode in {"Volume", "Average Volume"}:
         st.caption("Volume is reported in traded units, not CAD market value.")
+    elif mode == "Average USD Volume":
+        st.caption(
+            "Average USD volume uses a 20-day rolling average of estimated dollar "
+            "volume: mean(open, high, low, close) x volume x latest FX rate to USD."
+        )
     elif mode == "Rolling Volatility":
         st.caption("Rolling volatility is annualized from daily close-to-close returns.")
 
@@ -1793,6 +1902,7 @@ def render_cash_page(
     )
 
     render_cash_yield_chart(yields)
+    render_average_volume_chart("CASH.TO", prices)
     render_cash_dividend_chart(transactions)
 
     if transactions.empty:
@@ -1910,6 +2020,7 @@ def render_asset_page(
     )
 
     render_price_vs_cost_chart(display_prices, average_cost, transactions, prices)
+    render_average_volume_chart(symbol, display_prices)
     render_position_value_chart(display_prices, transactions, target_cagr)
     render_position_total_value_chart(display_prices, transactions, target_cagr)
 
@@ -2028,6 +2139,7 @@ def render_market_research_page(price_schema: str) -> None:
     )
 
     render_market_price_chart(symbol, display_prices)
+    render_average_volume_chart(symbol, display_prices)
 
 
 def render_placeholder_section(section: str, price_schema: str | None = None) -> None:
