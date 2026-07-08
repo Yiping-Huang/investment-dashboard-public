@@ -24,10 +24,8 @@ EMA_HISTORY_DAYS = 420
 VANCOUVER_TZ = ZoneInfo("America/Vancouver")
 SECTION_OVERVIEW = "Overview"
 SECTION_ACCOUNTS_TAX = "Accounts and Tax"
-SECTION_GOALS = "Goals"
-SECTION_ALLOCATION = "Allocation"
-SECTION_PERFORMANCE_INCOME = "Performance and Income"
-SECTION_RISK_LIQUIDITY = "Risk and Liquidity"
+SECTION_ASSETS = "Assets"
+SECTION_PORTFOLIOS = "Portfolios"
 SECTION_HOLDINGS = "Holdings"
 SECTION_RESEARCH = "Research"
 PREFERRED_HOLDING_SYMBOLS = [DEFAULT_SYMBOL, "XEQT.TO", "QQC.TO", "CASH.TO", "QQQ"]
@@ -46,41 +44,37 @@ HISTORY_WINDOW_OPTIONS = {
     "18 Months": 545,
     "2 Years": 730,
 }
+PORTFOLIO_PAGES = [
+    "Emergency Fund",
+    "Travel Fund",
+    "Claire Education Fund",
+    "Wedding Fund",
+    "Family Fund",
+    "Retirement Fund",
+]
+PORTFOLIO_SUBPAGES = [
+    "Asset Type Allocation",
+    "Target vs Actual Allocation",
+    "Investment Triangle",
+]
 SECTION_SUBPAGES = {
     SECTION_OVERVIEW: [
         "Net Worth",
         "Monthly Trend",
-        "Emergency Fund Progress",
         "Asset Allocation",
+        "Portfolio Allocation",
+        "Investment Triangle",
         "Tax Sheltered Allocation",
+        "Return vs Inflation",
+        "Holdings Yield Rate",
     ],
     SECTION_ACCOUNTS_TAX: [
         "Account Allocation",
         "Account Balances",
+        "Tax Advantaged Coverage",
         "TFSA Room",
         "RRSP Room",
-        "Tax Advantaged Coverage",
-    ],
-    SECTION_GOALS: [
-        "Short-Term Goals",
-        "Mid-Term Goals",
-        "Long-Term Goals",
-    ],
-    SECTION_ALLOCATION: [
-        "Asset Class Allocation",
-        "Target vs Actual Allocation",
-        "Purpose Allocation",
-    ],
-    SECTION_PERFORMANCE_INCOME: [
-        "Income Summary",
-        "Principal vs Growth",
-        "Return vs Inflation",
-        "Yield Table",
-    ],
-    SECTION_RISK_LIQUIDITY: [
-        "Portfolio Characteristics",
-        "Liquidity Ladder",
-        "Risk Allocation",
+        "FHSA Room",
     ],
     SECTION_RESEARCH: [
         "Watchlist",
@@ -89,14 +83,12 @@ SECTION_SUBPAGES = {
 }
 DASHBOARD_SECTIONS = [
     SECTION_OVERVIEW,
-    SECTION_ACCOUNTS_TAX,
-    SECTION_GOALS,
-    SECTION_ALLOCATION,
-    SECTION_PERFORMANCE_INCOME,
-    SECTION_RISK_LIQUIDITY,
     SECTION_HOLDINGS,
+    SECTION_ACCOUNTS_TAX,
+    SECTION_ASSETS,
     SECTION_RESEARCH,
 ]
+NAV_OPTIONS = [*DASHBOARD_SECTIONS, *PORTFOLIO_PAGES]
 
 
 def get_setting(name: str, default: str | None = None) -> str | None:
@@ -183,7 +175,7 @@ def require_supabase_auth() -> None:
 
 
 def sidebar() -> str:
-    if st.session_state.get("dashboard_page") not in DASHBOARD_SECTIONS:
+    if st.session_state.get("dashboard_page") not in NAV_OPTIONS:
         st.session_state["dashboard_page"] = SECTION_HOLDINGS
 
     st.markdown(
@@ -201,6 +193,14 @@ def sidebar() -> str:
             font-size: 1.35rem;
             font-weight: 700;
             line-height: 1.15;
+        }
+        .sidebar-section-title {
+            margin: 1.25rem 0 0.5rem 0;
+            padding: 0;
+            font-size: 1.02rem;
+            font-weight: 700;
+            letter-spacing: 0;
+            color: inherit;
         }
         [data-testid="stSidebar"] div.stButton > button {
             justify-content: flex-start;
@@ -243,6 +243,21 @@ def sidebar() -> str:
     with st.sidebar:
         st.markdown('<div class="sidebar-title">Dashboard</div>', unsafe_allow_html=True)
         for section in DASHBOARD_SECTIONS:
+            is_active = st.session_state["dashboard_page"] == section
+            if st.button(
+                section,
+                key=f"nav_{section}",
+                disabled=is_active,
+                width="stretch",
+                type="primary" if is_active else "secondary",
+            ):
+                st.session_state["dashboard_page"] = section
+                st.rerun()
+        st.markdown(
+            f'<div class="sidebar-section-title">{escape(SECTION_PORTFOLIOS)}</div>',
+            unsafe_allow_html=True,
+        )
+        for section in PORTFOLIO_PAGES:
             is_active = st.session_state["dashboard_page"] == section
             if st.button(
                 section,
@@ -1191,30 +1206,39 @@ def render_average_volume_chart(
     chart_data["Average Volume"] = (
         chart_data["Volume"].rolling(window, min_periods=1).mean()
     )
-    chart = (
-        alt.Chart(chart_data)
-        .mark_line(color="#0f766e", strokeWidth=2.4)
-        .encode(
-            x=alt.X("Date:T", title="Date"),
-            y=alt.Y(
+    base = alt.Chart(chart_data).encode(
+        x=alt.X("Date:T", title="Date"),
+        tooltip=[
+            alt.Tooltip("Date:T", title="Date"),
+            alt.Tooltip("Volume:Q", title="Daily Volume", format=",.0f"),
+            alt.Tooltip(
                 "Average Volume:Q",
-                title=f"{window}-Day Average Volume (units)",
-                scale=alt.Scale(zero=False),
+                title=f"{window}-Day Avg Volume",
+                format=",.0f",
             ),
-            tooltip=[
-                alt.Tooltip("Date:T", title="Date"),
-                alt.Tooltip("Volume:Q", title="Volume", format=",.0f"),
-                alt.Tooltip(
-                    "Average Volume:Q",
-                    title=f"{window}-Day Avg Volume",
-                    format=",.0f",
-                ),
-            ],
-        )
-        .properties(height=280)
+        ],
     )
-    st.subheader(f"{symbol} Average Volume")
-    st.altair_chart(chart, width="stretch")
+    daily_bars = (
+        base.mark_bar(color="#93c5fd", opacity=0.45)
+        .encode(
+            y=alt.Y("Volume:Q", title="Volume (units)", scale=alt.Scale(zero=False))
+        )
+    )
+    average_line = (
+        base.mark_line(color="#0f766e", strokeWidth=2.6)
+        .encode(y=alt.Y("Average Volume:Q", title="Volume (units)"))
+    )
+    st.subheader(f"{symbol} Volume")
+    st.altair_chart(
+        alt.layer(daily_bars, average_line).resolve_scale(y="shared").properties(height=300),
+        width="stretch",
+    )
+    chart_legend(
+        [
+            ("Daily Volume", "#93c5fd"),
+            (f"{window}-Day Avg Volume", "#0f766e"),
+        ]
+    )
 
 
 def comparison_price_data(
@@ -2144,29 +2168,66 @@ def render_market_research_page(price_schema: str) -> None:
 
 def render_placeholder_section(section: str, price_schema: str | None = None) -> None:
     subpages = SECTION_SUBPAGES[section]
-    selected_subpage = st.segmented_control(
-        "View",
-        subpages,
-        default=subpages[0],
-        key=f"subpage_{section}",
-    )
-    if not selected_subpage:
-        st.stop()
+    for tab, subpage in zip(st.tabs(subpages), subpages):
+        with tab:
+            render_section_subpage(section, subpage, price_schema)
 
-    if section == SECTION_RESEARCH and selected_subpage == "Comparison":
+
+def render_section_subpage(
+    section: str,
+    subpage: str,
+    price_schema: str | None = None,
+) -> None:
+    if section == SECTION_RESEARCH and subpage == "Comparison":
         if price_schema is None:
-            st.stop()
+            st.info("Price schema is not configured.")
+            return
         render_research_comparison_page(price_schema)
         return
 
-    if section == SECTION_RESEARCH and selected_subpage == "Watchlist":
+    if section == SECTION_RESEARCH and subpage == "Watchlist":
         if price_schema is None:
-            st.stop()
+            st.info("Price schema is not configured.")
+            return
         render_market_research_page(price_schema)
         return
 
-    st.subheader(selected_subpage)
+    if subpage == "Investment Triangle":
+        render_investment_triangle_placeholder(section)
+        return
+
+    st.subheader(subpage)
     st.info("Placeholder. This dashboard section is ready for future data and charts.")
+
+
+def render_investment_triangle_placeholder(context: str) -> None:
+    st.subheader(f"{context} - Investment Triangle")
+    st.info("Placeholder. Radar chart for return, liquidity, and risk.")
+
+    st.subheader("Yield Rate / Return Rate Allocation")
+    st.info("Placeholder. This section is ready for return and yield allocation data.")
+
+    st.subheader("Liquidity Allocation")
+    st.info("Placeholder. This section is ready for liquidity allocation data.")
+
+    st.subheader("Risk Allocation")
+    st.info("Placeholder. This section is ready for risk allocation data.")
+
+
+def render_simple_placeholder_page(page: str) -> None:
+    st.subheader(page)
+    st.info("Placeholder. This dashboard page is ready for future data and charts.")
+
+
+def render_portfolio_placeholder_page(portfolio_page: str) -> None:
+    for tab, subpage in zip(st.tabs(PORTFOLIO_SUBPAGES), PORTFOLIO_SUBPAGES):
+        with tab:
+            if subpage == "Investment Triangle":
+                render_investment_triangle_placeholder(portfolio_page)
+                continue
+
+            st.subheader(f"{portfolio_page} - {subpage}")
+            st.info("Placeholder. This portfolio page is ready for future data and charts.")
 
 
 def render_holdings_section(
@@ -2174,7 +2235,12 @@ def render_holdings_section(
     portfolio_schema: str,
     assets: pd.DataFrame,
 ) -> None:
-    st.subheader("Holdings")
+    yield_rate_tab, details_tab = st.tabs(["Yield Rate", "Details"])
+
+    with yield_rate_tab:
+        st.subheader("Yield Rate Comparison")
+        st.info("Placeholder. This section is ready for holding yield rate comparison.")
+
     try:
         all_transactions = load_transactions(portfolio_schema)
     except RuntimeError as error:
@@ -2186,46 +2252,58 @@ def render_holdings_section(
         st.info("No transaction history found yet.")
         st.stop()
 
-    selected_symbol = st.segmented_control(
-        "Holding",
-        holding_symbols,
-        default=DEFAULT_SYMBOL if DEFAULT_SYMBOL in holding_symbols else holding_symbols[0],
-    )
-    if not selected_symbol:
-        st.stop()
-
-    controls_col, _ = st.columns([1, 2])
-    with controls_col:
-        history_window_label = st.selectbox(
-            "History window",
-            list(HISTORY_WINDOW_OPTIONS.keys()),
-            index=list(HISTORY_WINDOW_OPTIONS.keys()).index("180 Days"),
-        )
-        target_cagr_pct = DEFAULT_TARGET_CAGR * 100
-        if selected_symbol != "CASH.TO":
-            target_cagr_pct = st.number_input(
-                "Target CAGR",
-                min_value=-50.0,
-                max_value=50.0,
-                value=DEFAULT_TARGET_CAGR * 100,
-                step=0.5,
-                format="%.1f",
+    with details_tab:
+        controls_col, _ = st.columns([1, 2])
+        with controls_col:
+            selected_symbol = st.selectbox(
+                "Holding",
+                holding_symbols,
+                index=(
+                    holding_symbols.index(DEFAULT_SYMBOL)
+                    if DEFAULT_SYMBOL in holding_symbols
+                    else 0
+                ),
+                key="holdings_detail_symbol",
             )
-        show_rows = st.checkbox("Show raw rows", value=False)
+            if not selected_symbol:
+                st.stop()
 
-    lookback_days = HISTORY_WINDOW_OPTIONS[history_window_label]
-    if selected_symbol == "CASH.TO":
-        render_cash_page(price_schema, portfolio_schema, lookback_days, show_rows)
-    else:
-        render_asset_page(
-            price_schema,
-            portfolio_schema,
-            assets,
-            lookback_days,
-            target_cagr_pct / 100,
-            show_rows,
-            selected_symbol,
-        )
+            history_window_label = st.selectbox(
+                "History window",
+                list(HISTORY_WINDOW_OPTIONS.keys()),
+                index=list(HISTORY_WINDOW_OPTIONS.keys()).index("180 Days"),
+                key="holdings_detail_history_window",
+            )
+            target_cagr_pct = DEFAULT_TARGET_CAGR * 100
+            if selected_symbol != "CASH.TO":
+                target_cagr_pct = st.number_input(
+                    "Target CAGR",
+                    min_value=-50.0,
+                    max_value=50.0,
+                    value=DEFAULT_TARGET_CAGR * 100,
+                    step=0.5,
+                    format="%.1f",
+                    key="holdings_detail_target_cagr",
+                )
+            show_rows = st.checkbox(
+                "Show raw rows",
+                value=False,
+                key="holdings_detail_show_rows",
+            )
+
+        lookback_days = HISTORY_WINDOW_OPTIONS[history_window_label]
+        if selected_symbol == "CASH.TO":
+            render_cash_page(price_schema, portfolio_schema, lookback_days, show_rows)
+        else:
+            render_asset_page(
+                price_schema,
+                portfolio_schema,
+                assets,
+                lookback_days,
+                target_cagr_pct / 100,
+                show_rows,
+                selected_symbol,
+            )
 
 
 def main() -> None:
@@ -2237,7 +2315,7 @@ def main() -> None:
     require_supabase_auth()
     section = sidebar()
 
-    st.title("Investment Dashboard")
+    st.title(section)
     price_schema = get_setting("SUPABASE_PRICE_SCHEMA", DEFAULT_PRICE_SCHEMA)
     portfolio_schema = get_setting(
         "SUPABASE_PORTFOLIO_SCHEMA", DEFAULT_PORTFOLIO_SCHEMA
@@ -2245,6 +2323,14 @@ def main() -> None:
 
     if section in SECTION_SUBPAGES:
         render_placeholder_section(section, price_schema)
+        return
+
+    if section in PORTFOLIO_PAGES:
+        render_portfolio_placeholder_page(section)
+        return
+
+    if section == SECTION_ASSETS:
+        render_simple_placeholder_page(section)
         return
 
     if section != SECTION_HOLDINGS:
