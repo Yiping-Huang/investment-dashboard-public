@@ -60,21 +60,13 @@ PORTFOLIO_SUBPAGES = [
 SECTION_SUBPAGES = {
     SECTION_OVERVIEW: [
         "Net Worth",
-        "Monthly Trend",
-        "Asset Allocation",
-        "Portfolio Allocation",
-        "Investment Triangle",
-        "Tax Sheltered Allocation",
         "Return vs Inflation",
-        "Holdings Yield Rate",
+        "Investment Triangle",
+        "Portfolio Overview",
     ],
     SECTION_ACCOUNTS_TAX: [
-        "Account Allocation",
-        "Account Balances",
-        "Tax Advantaged Coverage",
-        "TFSA Room",
-        "RRSP Room",
-        "FHSA Room",
+        "Account Details",
+        "Tax Benefit Details",
     ],
     SECTION_RESEARCH: [
         "Watchlist",
@@ -734,6 +726,50 @@ def chart_legend(items: list[tuple[str, str]]) -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_total_gain_rate_donut(gain_rate: float | None) -> None:
+    st.subheader("Total Gain Rate")
+    if gain_rate is None:
+        st.info("Total gain rate is not available yet.")
+        return
+
+    palette = chart_palette()
+    gain_color = palette["target_growth"] if gain_rate >= 0 else palette["average_cost"]
+    remainder_color = "rgba(148, 163, 184, 0.28)"
+    ring_fill = min(abs(gain_rate), 1.0)
+    chart_data = pd.DataFrame(
+        [
+            {"Segment": "Total Gain Rate", "Value": ring_fill},
+            {"Segment": "Remaining", "Value": max(1.0 - ring_fill, 0.0)},
+        ]
+    )
+    text_color = "#f9fafb" if is_dark_theme() else "#111827"
+    chart = (
+        alt.Chart(chart_data)
+        .mark_arc(innerRadius=58, outerRadius=82)
+        .encode(
+            theta=alt.Theta("Value:Q", stack=True),
+            color=alt.Color(
+                "Segment:N",
+                scale=alt.Scale(
+                    domain=["Total Gain Rate", "Remaining"],
+                    range=[gain_color, remainder_color],
+                ),
+                legend=None,
+            ),
+            tooltip=[
+                alt.Tooltip("Segment:N", title="Metric"),
+                alt.Tooltip("Value:Q", title="Ring share", format=".0%"),
+            ],
+        )
+    )
+    label = (
+        alt.Chart(pd.DataFrame([{"label": f"{gain_rate:.2%}"}]))
+        .mark_text(size=24, fontWeight="bold", color=text_color)
+        .encode(text="label:N")
+    )
+    st.altair_chart((chart + label).properties(height=210), width="stretch")
 
 
 def render_position_total_value_chart(
@@ -1609,6 +1645,7 @@ def cash_position_summary(
             "market_value": None,
             "dividends": None,
             "total_value": None,
+            "total_gain": None,
             "gain_rate": None,
         }
 
@@ -1644,6 +1681,7 @@ def cash_position_summary(
         "market_value": market_value,
         "dividends": dividends,
         "total_value": total_value,
+        "total_gain": total_gain,
         "gain_rate": gain_rate,
     }
 
@@ -1903,8 +1941,9 @@ def render_cash_page(
         ),
     )
     col4.metric(
-        "Total return",
-        f"{summary['gain_rate']:.2%}" if summary["gain_rate"] is not None else "Not set",
+        "Total gain",
+        f"{summary['total_gain']:,.2f}" if summary["total_gain"] is not None else "Not set",
+        f"{summary['gain_rate']:.2%}" if summary["gain_rate"] is not None else None,
     )
 
     col5, col6, col7, col8 = st.columns(4)
@@ -1925,6 +1964,7 @@ def render_cash_page(
         "with older rows derived from distributions and market closes."
     )
 
+    render_total_gain_rate_donut(summary["gain_rate"])
     render_cash_yield_chart(yields)
     render_average_volume_chart("CASH.TO", prices)
     render_cash_dividend_chart(transactions)
@@ -2043,6 +2083,7 @@ def render_asset_page(
         f"{total_return_pct:.2%}" if total_return_pct is not None else None,
     )
 
+    render_total_gain_rate_donut(total_return_pct)
     render_price_vs_cost_chart(display_prices, average_cost, transactions, prices)
     render_average_volume_chart(symbol, display_prices)
     render_position_value_chart(display_prices, transactions, target_cagr)
@@ -2076,17 +2117,17 @@ def render_market_research_page(price_schema: str) -> None:
 
     tracked = tracked.sort_values("symbol")
     symbols = tracked["symbol"].dropna().astype(str).tolist()
-    symbol = st.selectbox("Symbol", symbols)
-    metadata = tracked[tracked["symbol"] == symbol].iloc[0]
 
     controls_col, _ = st.columns([1, 2])
     with controls_col:
+        symbol = st.selectbox("Symbol", symbols)
         history_window_label = st.selectbox(
             "History window",
             list(HISTORY_WINDOW_OPTIONS.keys()),
             index=list(HISTORY_WINDOW_OPTIONS.keys()).index("180 Days"),
             key="watchlist_history_window",
         )
+    metadata = tracked[tracked["symbol"] == symbol].iloc[0]
 
     lookback_days = HISTORY_WINDOW_OPTIONS[history_window_label]
     display_start_date = (
@@ -2196,6 +2237,39 @@ def render_section_subpage(
         render_investment_triangle_placeholder(section)
         return
 
+    if section == SECTION_OVERVIEW and subpage == "Portfolio Overview":
+        st.subheader("Portfolio Allocation")
+        st.info("Placeholder. This section is ready for portfolio allocation data.")
+
+        st.subheader("Time Horizon Allocation")
+        st.info(
+            "Placeholder. This section is ready for short, medium, and long term "
+            "portfolio allocation data."
+        )
+        return
+
+    if section == SECTION_ACCOUNTS_TAX and subpage == "Account Details":
+        st.subheader("Account Allocation")
+        st.info("Placeholder. This section is ready for account allocation data.")
+
+        st.subheader("Account Balances")
+        st.info("Placeholder. This section is ready for account balance data.")
+        return
+
+    if section == SECTION_ACCOUNTS_TAX and subpage == "Tax Benefit Details":
+        st.subheader("Tax Advantaged Coverage")
+        st.info("Placeholder. This section is ready for tax advantaged coverage data.")
+
+        st.subheader("TFSA Room")
+        st.info("Placeholder. This section is ready for TFSA contribution room data.")
+
+        st.subheader("RRSP Room")
+        st.info("Placeholder. This section is ready for RRSP contribution room data.")
+
+        st.subheader("FHSA Room")
+        st.info("Placeholder. This section is ready for FHSA participation room data.")
+        return
+
     st.subheader(subpage)
     st.info("Placeholder. This dashboard section is ready for future data and charts.")
 
@@ -2215,6 +2289,16 @@ def render_investment_triangle_placeholder(context: str) -> None:
 
 
 def render_simple_placeholder_page(page: str) -> None:
+    if page == SECTION_ASSETS:
+        details_tab = st.tabs(["Details"])[0]
+        with details_tab:
+            st.subheader("Asset Type Allocation")
+            st.info("Placeholder. This section is ready for asset type allocation data.")
+
+            st.subheader("Asset Details")
+            st.info("Placeholder. This section is ready for asset detail data.")
+        return
+
     st.subheader(page)
     st.info("Placeholder. This dashboard page is ready for future data and charts.")
 
@@ -2235,7 +2319,13 @@ def render_holdings_section(
     portfolio_schema: str,
     assets: pd.DataFrame,
 ) -> None:
-    yield_rate_tab, details_tab = st.tabs(["Yield Rate", "Details"])
+    principal_growth_tab, yield_rate_tab, details_tab = st.tabs(
+        ["Principal vs Growth", "Yield Rate", "Details"]
+    )
+
+    with principal_growth_tab:
+        st.subheader("Principal vs Growth")
+        st.info("Placeholder. This section is ready for principal vs growth data.")
 
     with yield_rate_tab:
         st.subheader("Yield Rate Comparison")
