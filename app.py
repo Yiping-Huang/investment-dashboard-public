@@ -382,44 +382,6 @@ def load_prices(price_schema: str, symbol: str, start_date: date) -> pd.DataFram
     return frame
 
 
-def load_positions(portfolio_schema: str, symbol: str) -> pd.DataFrame:
-    access_token = supabase_auth_token()
-    if not access_token:
-        raise RuntimeError("Sign in before reading portfolio data.")
-
-    try:
-        rows = fetch_table(
-            portfolio_schema,
-            "latest_positions",
-            (
-                ("select", "symbol,account_name,quantity,average_cost,currency,as_of_date,notes"),
-                ("symbol", f"eq.{symbol}"),
-                ("order", "as_of_date.desc"),
-            ),
-            access_token,
-        )
-    except RuntimeError:
-        rows = fetch_table(
-            portfolio_schema,
-            "positions",
-            (
-                ("select", "symbol,account_name,quantity,average_cost,currency,as_of_date,notes"),
-                ("symbol", f"eq.{symbol}"),
-                ("order", "as_of_date.desc"),
-            ),
-            access_token,
-        )
-
-    frame = pd.DataFrame(rows)
-    if frame.empty:
-        return frame
-
-    frame["quantity"] = pd.to_numeric(frame["quantity"], errors="coerce")
-    frame["average_cost"] = pd.to_numeric(frame["average_cost"], errors="coerce")
-    frame["as_of_date"] = pd.to_datetime(frame["as_of_date"])
-    return frame
-
-
 def load_transactions(portfolio_schema: str, symbol: str | None = None) -> pd.DataFrame:
     access_token = supabase_auth_token()
     if not access_token:
@@ -440,6 +402,33 @@ def load_transactions(portfolio_schema: str, symbol: str | None = None) -> pd.Da
     for column in ["quantity", "price", "fees"]:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
     frame["transaction_date"] = pd.to_datetime(frame["transaction_date"])
+    return frame
+
+
+def load_holdings(portfolio_schema: str, symbol: str | None = None) -> pd.DataFrame:
+    access_token = supabase_auth_token()
+    if not access_token:
+        raise RuntimeError("Sign in before reading portfolio data.")
+
+    params: list[tuple[str, str]] = [
+        ("select", "symbol,account_id,account_name,bought_quantity,sold_quantity,net_quantity,weighted_average_cost,currency"),
+        ("order", "symbol.asc"),
+    ]
+    if symbol:
+        params.append(("symbol", f"eq.{symbol}"))
+
+    rows = fetch_table(portfolio_schema, "holdings", tuple(params), access_token)
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+
+    for column in [
+        "bought_quantity",
+        "sold_quantity",
+        "net_quantity",
+        "weighted_average_cost",
+    ]:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
     return frame
 
 
@@ -490,23 +479,15 @@ def load_fund_distributions(price_schema: str, symbol: str) -> pd.DataFrame:
     return frame
 
 
-def holding_symbol_options(assets: pd.DataFrame) -> list[str]:
-    symbols = [str(symbol) for symbol in assets["symbol"].dropna().tolist()]
-    available_symbols = set(symbols)
-    preferred_symbols = [
-        symbol for symbol in PREFERRED_HOLDING_SYMBOLS if symbol in available_symbols
-    ]
-    remaining_symbols = sorted(
-        symbol for symbol in symbols if symbol not in set(preferred_symbols)
-    )
-    return preferred_symbols + remaining_symbols
-
-
-def transaction_symbol_options(transactions: pd.DataFrame) -> list[str]:
-    if transactions.empty or "symbol" not in transactions:
+def holding_symbol_options(holdings: pd.DataFrame) -> list[str]:
+    if holdings.empty or "symbol" not in holdings:
         return []
 
-    symbols = [str(symbol) for symbol in transactions["symbol"].dropna().tolist()]
+    active_holdings = holdings
+    if "net_quantity" in holdings:
+        active_holdings = holdings[holdings["net_quantity"].fillna(0) != 0]
+
+    symbols = [str(symbol) for symbol in active_holdings["symbol"].dropna().tolist()]
     available_symbols = set(symbols)
     preferred_symbols = [
         symbol for symbol in PREFERRED_HOLDING_SYMBOLS if symbol in available_symbols
@@ -517,34 +498,30 @@ def transaction_symbol_options(transactions: pd.DataFrame) -> list[str]:
     return preferred_symbols + remaining_symbols
 
 
-def weighted_average_cost(positions: pd.DataFrame) -> float | None:
-    if positions.empty:
-        return None
-    total_quantity = positions["quantity"].sum()
+def holding_summary(holdings: pd.DataFrame) -> tuple[float | None, float | None]:
+    if holdings.empty:
+        return None, None
+
+    active_holdings = holdings[holdings["net_quantity"].fillna(0) != 0].copy()
+    if active_holdings.empty:
+        return None, None
+
+    total_quantity = active_holdings["net_quantity"].sum()
     if not total_quantity:
-        return None
-    return float((positions["quantity"] * positions["average_cost"]).sum() / total_quantity)
-
-
-def weighted_average_cost_from_transactions(
-    transactions: pd.DataFrame,
-) -> tuple[float | None, float | None]:
-    if transactions.empty:
         return None, None
 
-    buys = transactions[transactions["transaction_type"] == "buy"].copy()
-    if buys.empty:
-        return None, None
+    cost_rows = active_holdings.dropna(subset=["weighted_average_cost"])
+    if cost_rows.empty:
+        return None, float(total_quantity)
 
-    buy_quantity = buys["quantity"].sum()
-    if not buy_quantity:
-        return None, None
+    weighted_cost = (
+        cost_rows["weighted_average_cost"] * cost_rows["net_quantity"]
+    ).sum()
+    cost_quantity = cost_rows["net_quantity"].sum()
+    if not cost_quantity:
+        return None, float(total_quantity)
 
-    weighted_cost = ((buys["quantity"] * buys["price"]) + buys["fees"].fillna(0)).sum()
-    sold_quantity = transactions.loc[
-        transactions["transaction_type"] == "sell", "quantity"
-    ].sum()
-    return float(weighted_cost / buy_quantity), float(buy_quantity - sold_quantity)
+    return float(weighted_cost / cost_quantity), float(total_quantity)
 
 
 def position_value_data(
@@ -2006,15 +1983,11 @@ def render_asset_page(
 
     try:
         prices = load_prices(price_schema, symbol, start_date)
+        holdings = load_holdings(portfolio_schema, symbol)
         transactions = load_transactions(portfolio_schema, symbol)
     except RuntimeError as error:
         st.error(str(error))
         st.stop()
-
-    try:
-        positions = load_positions(portfolio_schema, symbol)
-    except RuntimeError:
-        positions = pd.DataFrame()
 
     if prices.empty:
         st.warning(f"No price rows found for {symbol}.")
@@ -2028,10 +2001,7 @@ def render_asset_page(
     if display_prices.empty:
         display_prices = prices
 
-    average_cost, total_quantity = weighted_average_cost_from_transactions(transactions)
-    if average_cost is None:
-        average_cost = weighted_average_cost(positions)
-        total_quantity = float(positions["quantity"].sum()) if not positions.empty else None
+    average_cost, total_quantity = holding_summary(holdings)
 
     latest = prices.iloc[-1]
     latest_close = float(latest["close"])
@@ -2092,9 +2062,6 @@ def render_asset_page(
     if not transactions.empty:
         st.subheader("Transaction History")
         st.dataframe(transactions, width="stretch", hide_index=True)
-    elif not positions.empty:
-        st.subheader("Legacy Position Inputs")
-        st.dataframe(positions, width="stretch", hide_index=True)
     else:
         st.info("No purchase history found.")
 
@@ -2332,12 +2299,12 @@ def render_holdings_section(
         st.info("Placeholder. This section is ready for holding yield rate comparison.")
 
     try:
-        all_transactions = load_transactions(portfolio_schema)
+        all_holdings = load_holdings(portfolio_schema)
     except RuntimeError as error:
         st.error(str(error))
         st.stop()
 
-    holding_symbols = transaction_symbol_options(all_transactions)
+    holding_symbols = holding_symbol_options(all_holdings)
     if not holding_symbols:
         st.info("No transaction history found yet.")
         st.stop()
