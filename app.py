@@ -44,19 +44,15 @@ HISTORY_WINDOW_OPTIONS = {
     "18 Months": 545,
     "2 Years": 730,
 }
-PORTFOLIO_PAGES = [
-    "Emergency Fund",
-    "Travel Fund",
-    "Claire Education Fund",
-    "Wedding Fund",
-    "Family Fund",
-    "Retirement Fund",
-]
 PORTFOLIO_SUBPAGES = [
     "Asset Type Allocation",
     "Target vs Actual Allocation",
     "Investment Triangle",
 ]
+PORTFOLIO_SELECT_COLUMNS = (
+    "id,name,slug,start_year,target_horizon_years_min,target_horizon_years_max,"
+    "description,active,archived,display_order,created_at,updated_at"
+)
 SECTION_SUBPAGES = {
     SECTION_OVERVIEW: [
         "Net Worth",
@@ -80,7 +76,6 @@ DASHBOARD_SECTIONS = [
     SECTION_ASSETS,
     SECTION_RESEARCH,
 ]
-NAV_OPTIONS = [*DASHBOARD_SECTIONS, *PORTFOLIO_PAGES]
 
 
 def get_setting(name: str, default: str | None = None) -> str | None:
@@ -166,8 +161,12 @@ def require_supabase_auth() -> None:
     st.stop()
 
 
-def sidebar() -> str:
-    if st.session_state.get("dashboard_page") not in NAV_OPTIONS:
+def nav_options(portfolio_pages: list[str]) -> list[str]:
+    return [*DASHBOARD_SECTIONS, *portfolio_pages]
+
+
+def sidebar(portfolio_pages: list[str]) -> str:
+    if st.session_state.get("dashboard_page") not in nav_options(portfolio_pages):
         st.session_state["dashboard_page"] = SECTION_HOLDINGS
 
     st.markdown(
@@ -249,7 +248,7 @@ def sidebar() -> str:
             f'<div class="sidebar-section-title">{escape(SECTION_PORTFOLIOS)}</div>',
             unsafe_allow_html=True,
         )
-        for section in PORTFOLIO_PAGES:
+        for section in portfolio_pages:
             is_active = st.session_state["dashboard_page"] == section
             if st.button(
                 section,
@@ -380,6 +379,50 @@ def load_prices(price_schema: str, symbol: str, start_date: date) -> pd.DataFram
         if column in frame:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
     return frame
+
+
+def load_portfolios(portfolio_schema: str) -> pd.DataFrame:
+    access_token = supabase_auth_token()
+    if not access_token:
+        raise RuntimeError("Sign in before reading portfolio data.")
+
+    rows = fetch_table(
+        portfolio_schema,
+        "portfolios",
+        (
+            ("select", PORTFOLIO_SELECT_COLUMNS),
+            ("active", "eq.true"),
+            ("archived", "eq.false"),
+            ("order", "display_order.asc,name.asc"),
+        ),
+        access_token,
+    )
+    frame = pd.DataFrame(rows)
+    for column in [
+        "id",
+        "start_year",
+        "target_horizon_years_min",
+        "target_horizon_years_max",
+        "display_order",
+    ]:
+        if column in frame:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    return frame
+
+
+def portfolio_page_options(portfolios: pd.DataFrame) -> list[str]:
+    if portfolios.empty or "name" not in portfolios:
+        return []
+    return [str(name) for name in portfolios["name"].dropna()]
+
+
+def portfolio_metadata_by_name(portfolios: pd.DataFrame, name: str) -> pd.Series | None:
+    if portfolios.empty or "name" not in portfolios:
+        return None
+    matching = portfolios[portfolios["name"] == name]
+    if matching.empty:
+        return None
+    return matching.iloc[0]
 
 
 def load_transactions(portfolio_schema: str, symbol: str | None = None) -> pd.DataFrame:
@@ -1087,6 +1130,49 @@ def format_optional_int(value: Any) -> str:
     if value is None or pd.isna(value):
         return "Not available"
     return f"{float(value):,.0f}"
+
+
+def format_year(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "Not available"
+    return f"{int(value)}"
+
+
+def compact_horizon_label(min_years: Any, max_years: Any) -> str:
+    if min_years is None or pd.isna(min_years):
+        return "Not set"
+    min_value = float(min_years)
+    if max_years is None or pd.isna(max_years) or float(max_years) == min_value:
+        return f"{min_value:g} yr"
+    return f"{min_value:g}-{float(max_years):g} yrs"
+
+
+def portfolio_status_label(portfolio: pd.Series) -> str:
+    labels = []
+    if bool(portfolio.get("active", False)):
+        labels.append("Active")
+    else:
+        labels.append("Inactive")
+    if bool(portfolio.get("archived", False)):
+        labels.append("Archived")
+    return " / ".join(labels)
+
+
+def render_portfolio_metadata_summary(portfolio: pd.Series) -> None:
+    description = portfolio.get("description")
+    if isinstance(description, str) and description.strip():
+        st.caption(description.strip())
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Start", format_year(portfolio.get("start_year")))
+    col2.metric(
+        "Horizon",
+        compact_horizon_label(
+            portfolio.get("target_horizon_years_min"),
+            portfolio.get("target_horizon_years_max"),
+        ),
+    )
+    col3.metric("Status", portfolio_status_label(portfolio))
 
 
 def format_optional_number(value: Any, decimals: int = 2) -> str:
@@ -2270,7 +2356,10 @@ def render_simple_placeholder_page(page: str) -> None:
     st.info("Placeholder. This dashboard page is ready for future data and charts.")
 
 
-def render_portfolio_placeholder_page(portfolio_page: str) -> None:
+def render_portfolio_placeholder_page(portfolio: pd.Series) -> None:
+    portfolio_page = str(portfolio["name"])
+    render_portfolio_metadata_summary(portfolio)
+
     for tab, subpage in zip(st.tabs(PORTFOLIO_SUBPAGES), PORTFOLIO_SUBPAGES):
         with tab:
             if subpage == "Investment Triangle":
@@ -2370,20 +2459,31 @@ def main() -> None:
         layout="wide",
     )
     require_supabase_auth()
-    section = sidebar()
-
-    st.title(section)
     price_schema = get_setting("SUPABASE_PRICE_SCHEMA", DEFAULT_PRICE_SCHEMA)
     portfolio_schema = get_setting(
         "SUPABASE_PORTFOLIO_SCHEMA", DEFAULT_PORTFOLIO_SCHEMA
     )
 
+    try:
+        visible_portfolios = load_portfolios(portfolio_schema)
+        portfolio_pages = portfolio_page_options(visible_portfolios)
+    except RuntimeError as error:
+        st.error(str(error))
+        st.stop()
+
+    section = sidebar(portfolio_pages)
+    st.title(section)
+
     if section in SECTION_SUBPAGES:
         render_placeholder_section(section, price_schema)
         return
 
-    if section in PORTFOLIO_PAGES:
-        render_portfolio_placeholder_page(section)
+    if section in portfolio_pages:
+        selected_portfolio = portfolio_metadata_by_name(visible_portfolios, section)
+        if selected_portfolio is None:
+            st.warning("Portfolio is no longer available.")
+            st.stop()
+        render_portfolio_placeholder_page(selected_portfolio)
         return
 
     if section == SECTION_ASSETS:
