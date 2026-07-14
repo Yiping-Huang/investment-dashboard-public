@@ -12,6 +12,7 @@ import altair as alt
 import pandas as pd
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 DEFAULT_PRICE_SCHEMA = "market"
@@ -22,6 +23,37 @@ COMFORT_ZONE_MULTIPLIER = 0.10
 EMA_PERIODS = [8, 20, 50, 100, 200]
 EMA_HISTORY_DAYS = 420
 VANCOUVER_TZ = ZoneInfo("America/Vancouver")
+PORTFOLIO_ASSET_TYPES = {
+    "cash": "Cash",
+    "savings_account": "Savings account",
+    "money_market": "Money market",
+    "gic": "GIC",
+    "redeemable_gic": "Flexible / Redeemable GIC",
+    "equity_index": "Equity index",
+    "equity": "Equity",
+    "bond": "Bond",
+    "fixed_income": "Fixed income",
+    "real_estate": "Real estate",
+    "gold": "Gold",
+    "commodity": "Commodity",
+    "crypto": "Crypto",
+    "alternative": "Alternative",
+    "balanced_fund": "Balanced fund",
+    "other": "Other",
+}
+ACCOUNT_TYPE_LABELS = {
+    "tfsa": "TFSA",
+    "rrsp": "RRSP",
+    "fhsa": "FHSA",
+    "taxable": "Taxable",
+    "non_registered": "Non-registered",
+    "chequing": "Chequing",
+    "savings": "Savings",
+    "brokerage": "Brokerage",
+    "cash": "Cash",
+    "other": "Other",
+}
+REGISTERED_ACCOUNT_TYPES = ["tfsa", "rrsp", "fhsa"]
 SECTION_OVERVIEW = "Overview"
 SECTION_ACCOUNTS_TAX = "Accounts and Tax"
 SECTION_ASSETS = "Assets"
@@ -475,6 +507,149 @@ def load_holdings(portfolio_schema: str, symbol: str | None = None) -> pd.DataFr
     return frame
 
 
+def load_accounts(portfolio_schema: str) -> pd.DataFrame:
+    access_token = supabase_auth_token()
+    if not access_token:
+        raise RuntimeError("Sign in before reading portfolio data.")
+
+    rows = fetch_table(
+        portfolio_schema,
+        "account_current_balances",
+        (
+            (
+                "select",
+                "id,account_name,institution,account_type,currency,current_interest_rate,"
+                "cash_balance,holdings_market_value,current_balance,notes,created_at",
+            ),
+            ("order", "account_name.asc"),
+        ),
+        access_token,
+    )
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+
+    for column in [
+        "id",
+        "current_interest_rate",
+        "cash_balance",
+        "holdings_market_value",
+        "current_balance",
+    ]:
+        if column in frame:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    if "created_at" in frame:
+        frame["created_at"] = pd.to_datetime(frame["created_at"], errors="coerce")
+    return frame
+
+
+def load_registered_account_room_status(portfolio_schema: str) -> pd.DataFrame:
+    access_token = supabase_auth_token()
+    if not access_token:
+        raise RuntimeError("Sign in before reading portfolio data.")
+
+    rows = fetch_table(
+        portfolio_schema,
+        "registered_account_room_status",
+        (
+            (
+                "select",
+                "wrapper_type,total_room,used_room,remaining_room,overused_room,"
+                "used_pct,remaining_pct,account_count,protected_balance,notes,"
+                "created_at,updated_at",
+            ),
+            ("order", "wrapper_type.asc"),
+        ),
+        access_token,
+    )
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+
+    for column in [
+        "total_room",
+        "used_room",
+        "remaining_room",
+        "overused_room",
+        "used_pct",
+        "remaining_pct",
+        "account_count",
+        "protected_balance",
+    ]:
+        if column in frame:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    for column in ["created_at", "updated_at"]:
+        if column in frame:
+            frame[column] = pd.to_datetime(frame[column], errors="coerce")
+    return frame
+
+
+def load_holding_current_values(portfolio_schema: str) -> pd.DataFrame:
+    access_token = supabase_auth_token()
+    if not access_token:
+        raise RuntimeError("Sign in before reading portfolio data.")
+
+    rows = fetch_table(
+        portfolio_schema,
+        "holding_current_values",
+        (
+            (
+                "select",
+                "id,portfolio_id,portfolio_name,asset_id,asset_name,ticker,asset_type,"
+                "valuation_method,market_symbol,holding_name,net_quantity,book_value,"
+                "weighted_average_cost,market_price,current_value,currency,start_date,"
+                "maturity_date,interest_rate,interest_rate_type,compounding_frequency,"
+                "principal_amount,maturity_value,closed_on,auto_accrue_interest,"
+                "risk_score,liquidity_score,return_score,expected_return_rate,"
+                "volatility_rate,matured_principal,accrued_interest,"
+                "expected_maturity_value,notes,active,archived,display_order,"
+                "created_at,updated_at",
+            ),
+            ("order", "portfolio_name.asc,asset_name.asc"),
+        ),
+        access_token,
+    )
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+
+    for column in [
+        "id",
+        "portfolio_id",
+        "asset_id",
+        "net_quantity",
+        "book_value",
+        "principal_value",
+        "weighted_average_cost",
+        "market_price",
+        "current_value",
+        "interest_rate",
+        "principal_amount",
+        "maturity_value",
+        "risk_score",
+        "liquidity_score",
+        "return_score",
+        "expected_return_rate",
+        "volatility_rate",
+        "matured_principal",
+        "accrued_interest",
+        "expected_maturity_value",
+        "display_order",
+    ]:
+        if column in frame:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    for column in [
+        "start_date",
+        "maturity_date",
+        "closed_on",
+        "created_at",
+        "updated_at",
+    ]:
+        if column in frame:
+            frame[column] = pd.to_datetime(frame[column], errors="coerce")
+    return frame
+
+
 def load_fund_yields(price_schema: str, symbol: str, start_date: date) -> pd.DataFrame:
     rows = fetch_table(
         price_schema,
@@ -520,6 +695,434 @@ def load_fund_distributions(price_schema: str, symbol: str) -> pd.DataFrame:
         frame[column] = pd.to_datetime(frame[column])
     frame["payment_amount"] = pd.to_numeric(frame["payment_amount"], errors="coerce")
     return frame
+
+
+@st.cache_data(ttl=3600)
+def load_canada_inflation(price_schema: str) -> pd.DataFrame:
+    rows = fetch_table(
+        price_schema,
+        "canada_inflation",
+        (
+            (
+                "select",
+                "observation_month,inflation_rate,source,notes,created_at,updated_at",
+            ),
+            ("order", "observation_month.desc"),
+        ),
+        supabase_auth_token(),
+    )
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+
+    if "observation_month" in frame:
+        frame["observation_month"] = pd.to_datetime(
+            frame["observation_month"],
+            errors="coerce",
+        )
+    if "inflation_rate" in frame:
+        frame["inflation_rate"] = pd.to_numeric(
+            frame["inflation_rate"],
+            errors="coerce",
+        )
+    for column in ["created_at", "updated_at"]:
+        if column in frame:
+            frame[column] = pd.to_datetime(frame[column], errors="coerce")
+    return frame
+
+
+def load_holding_transactions_current(portfolio_schema: str) -> pd.DataFrame:
+    access_token = supabase_auth_token()
+    if not access_token:
+        raise RuntimeError("Sign in before reading portfolio data.")
+
+    rows = fetch_table(
+        portfolio_schema,
+        "transactions",
+        (
+            (
+                "select",
+                "id,holding_id,transaction_type,quantity,price,fees,cash_amount,"
+                "principal_amount,interest_amount,income_amount",
+            ),
+            ("order", "transaction_date.desc,id.desc"),
+        ),
+        access_token,
+    )
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+
+    for column in [
+        "id",
+        "holding_id",
+        "quantity",
+        "price",
+        "fees",
+        "cash_amount",
+        "principal_amount",
+        "interest_amount",
+        "income_amount",
+    ]:
+        if column in frame:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    return frame
+
+
+def active_detail_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+
+    active_rows = frame.copy()
+    if "active" in active_rows:
+        active_rows = active_rows[active_rows["active"].fillna(False)]
+    if "archived" in active_rows:
+        active_rows = active_rows[~active_rows["archived"].fillna(False)]
+
+    value_columns = [
+        column
+        for column in [
+            "net_quantity",
+            "current_value",
+            "expected_maturity_value",
+            "maturity_value",
+            "principal_amount",
+            "principal_value",
+            "book_value",
+            "accrued_interest",
+        ]
+        if column in active_rows
+    ]
+    if value_columns:
+        numeric_values = active_rows[value_columns].apply(
+            pd.to_numeric,
+            errors="coerce",
+        ).fillna(0)
+        active_rows = active_rows[numeric_values.abs().sum(axis=1) != 0]
+    return active_rows
+
+
+def ensure_principal_value_column(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame.copy()
+
+    normalized = frame.copy()
+    book_values = (
+        pd.to_numeric(normalized.get("book_value"), errors="coerce")
+        if "book_value" in normalized
+        else pd.Series([pd.NA] * len(normalized), index=normalized.index, dtype="object")
+    )
+    if "principal_value" not in normalized:
+        normalized["principal_value"] = book_values
+    else:
+        normalized["principal_value"] = pd.to_numeric(
+            normalized["principal_value"],
+            errors="coerce",
+        ).where(
+            pd.to_numeric(normalized["principal_value"], errors="coerce").notna(),
+            book_values,
+        )
+    return normalized
+
+
+def holdings_overview_label(row: pd.Series | dict[str, Any]) -> str:
+    portfolio_name = row.get("portfolio_name")
+    asset_name = row.get("asset_name")
+    portfolio_label = (
+        str(portfolio_name).strip()
+        if portfolio_name is not None and not pd.isna(portfolio_name) and str(portfolio_name).strip()
+        else "Unknown portfolio"
+    )
+    asset_label = (
+        str(asset_name).strip()
+        if asset_name is not None and not pd.isna(asset_name) and str(asset_name).strip()
+        else f"Holding {int(row.get('id', 0))}"
+    )
+    holding_name = row.get("holding_name")
+    if holding_name is None or pd.isna(holding_name) or not str(holding_name).strip():
+        return f"{portfolio_label} - {asset_label}"
+    return f"{portfolio_label} - {asset_label} ({str(holding_name).strip()})"
+
+
+def asset_type_label(asset_type: Any) -> str:
+    if asset_type is None or pd.isna(asset_type):
+        return "Unknown"
+    return PORTFOLIO_ASSET_TYPES.get(str(asset_type), str(asset_type))
+
+
+def holdings_display_name(row: pd.Series | dict[str, Any]) -> str:
+    holding_name = row.get("holding_name")
+    if holding_name is not None and not pd.isna(holding_name) and str(holding_name).strip():
+        return str(holding_name).strip()
+    asset_name = row.get("asset_name")
+    if asset_name is not None and not pd.isna(asset_name) and str(asset_name).strip():
+        return str(asset_name).strip()
+    return f"Holding {int(row.get('id', 0))}"
+
+
+def portfolio_initials(name: Any) -> str:
+    if name is None or pd.isna(name) or not str(name).strip():
+        return "UP"
+    parts = [part for part in str(name).strip().split() if part]
+    if not parts:
+        return "UP"
+    return "".join(part[0].upper() for part in parts)
+
+
+def principal_growth_axis_name(row: pd.Series | dict[str, Any], view_mode: str) -> str:
+    holding_name = holdings_display_name(row)
+    if view_mode == "View by Portfolio":
+        ticker = row.get("ticker")
+        if ticker is not None and not pd.isna(ticker) and str(ticker).strip():
+            return f"{str(ticker).strip()} {holding_name}"
+        return holding_name
+    return f"{portfolio_initials(row.get('portfolio_name'))} {holding_name}"
+
+
+def holding_principal_adjustments(
+    transactions: pd.DataFrame,
+) -> pd.Series:
+    if transactions.empty:
+        return pd.Series(dtype="float64")
+
+    normalized = transactions.copy()
+    for column in [
+        "holding_id",
+        "quantity",
+        "price",
+        "fees",
+        "cash_amount",
+        "principal_amount",
+        "interest_amount",
+    ]:
+        if column not in normalized:
+            normalized[column] = pd.Series(dtype="float64")
+        normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
+
+    normalized["fees"] = normalized["fees"].fillna(0)
+    normalized["transaction_amount"] = normalized["cash_amount"]
+    no_cash_mask = normalized["transaction_amount"].isna()
+    normalized.loc[no_cash_mask, "transaction_amount"] = (
+        normalized.loc[no_cash_mask, "quantity"].fillna(0)
+        * normalized.loc[no_cash_mask, "price"].fillna(0)
+    )
+    remaining_mask = normalized["transaction_amount"].isna() | (
+        normalized["transaction_amount"] == 0
+    )
+    normalized.loc[remaining_mask, "transaction_amount"] = normalized.loc[
+        remaining_mask, "price"
+    ]
+    remaining_mask = normalized["transaction_amount"].isna() | (
+        normalized["transaction_amount"] == 0
+    )
+    normalized.loc[remaining_mask, "transaction_amount"] = normalized.loc[
+        remaining_mask, "quantity"
+    ]
+    remaining_mask = normalized["transaction_amount"].isna() | (
+        normalized["transaction_amount"] == 0
+    )
+    normalized.loc[remaining_mask, "transaction_amount"] = (
+        normalized.loc[remaining_mask, "principal_amount"].fillna(0)
+        + normalized.loc[remaining_mask, "interest_amount"].fillna(0)
+    )
+    normalized["transaction_amount"] = normalized["transaction_amount"].fillna(0)
+
+    normalized["principal_component"] = 0.0
+    buy_mask = normalized["transaction_type"] == "buy"
+    sell_mask = normalized["transaction_type"] == "sell"
+    deposit_mask = normalized["transaction_type"].isin(["deposit", "transfer_in"])
+    withdrawal_mask = normalized["transaction_type"].isin(["withdrawal", "transfer_out"])
+    maturity_mask = normalized["transaction_type"] == "maturity"
+
+    normalized.loc[buy_mask, "principal_component"] = (
+        normalized.loc[buy_mask, "transaction_amount"] + normalized.loc[buy_mask, "fees"]
+    )
+    normalized.loc[sell_mask, "principal_component"] = -(
+        normalized.loc[sell_mask, "transaction_amount"] + normalized.loc[sell_mask, "fees"]
+    )
+    normalized.loc[deposit_mask, "principal_component"] = normalized.loc[
+        deposit_mask, "transaction_amount"
+    ]
+    normalized.loc[withdrawal_mask, "principal_component"] = -normalized.loc[
+        withdrawal_mask, "transaction_amount"
+    ]
+    normalized.loc[maturity_mask, "principal_component"] = -normalized.loc[
+        maturity_mask, "principal_amount"
+    ].fillna(
+        normalized.loc[maturity_mask, "transaction_amount"]
+        - normalized.loc[maturity_mask, "interest_amount"].fillna(0)
+    )
+
+    return normalized.groupby("holding_id")["principal_component"].sum()
+
+
+def holding_income_adjustments(
+    transactions: pd.DataFrame,
+) -> pd.Series:
+    if transactions.empty:
+        return pd.Series(dtype="float64")
+
+    normalized = transactions.copy()
+    for column in [
+        "holding_id",
+        "cash_amount",
+        "interest_amount",
+        "income_amount",
+    ]:
+        if column not in normalized:
+            normalized[column] = pd.Series(dtype="float64")
+        normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
+
+    normalized["income_component"] = normalized["income_amount"]
+
+    dividend_interest_mask = normalized["transaction_type"].isin(["dividend", "interest"])
+    normalized.loc[
+        dividend_interest_mask & normalized["income_component"].isna(),
+        "income_component",
+    ] = normalized.loc[
+        dividend_interest_mask & normalized["income_component"].isna(),
+        "cash_amount",
+    ]
+
+    maturity_mask = normalized["transaction_type"] == "maturity"
+    normalized.loc[
+        maturity_mask & normalized["income_component"].isna(),
+        "income_component",
+    ] = normalized.loc[
+        maturity_mask & normalized["income_component"].isna(),
+        "interest_amount",
+    ]
+
+    normalized["income_component"] = normalized["income_component"].fillna(0)
+    return normalized.groupby("holding_id")["income_component"].sum()
+
+
+def active_holdings_overview_rows(
+    holding_values: pd.DataFrame,
+    transactions: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    active_holdings = ensure_principal_value_column(active_detail_rows(holding_values))
+    if active_holdings.empty:
+        return active_holdings
+
+    for column in ["principal_value", "current_value", "expected_return_rate"]:
+        if column not in active_holdings:
+            active_holdings[column] = 0
+        active_holdings[column] = pd.to_numeric(
+            active_holdings[column],
+            errors="coerce",
+        )
+    active_holdings["principal_value"] = active_holdings["principal_value"].fillna(0)
+    active_holdings["accumulated_income_amount"] = 0.0
+    if transactions is not None and not transactions.empty:
+        adjusted_principal = holding_principal_adjustments(transactions)
+        adjusted_income = holding_income_adjustments(transactions)
+        active_holdings["principal_value"] = (
+            active_holdings["id"]
+            .map(adjusted_principal)
+            .fillna(active_holdings["principal_value"])
+        )
+        active_holdings["accumulated_income_amount"] = (
+            active_holdings["id"].map(adjusted_income).fillna(0)
+        )
+    active_holdings["current_value"] = active_holdings["current_value"].fillna(0)
+    active_holdings["growth_value"] = (
+        active_holdings["current_value"]
+        - active_holdings["principal_value"]
+        + active_holdings["accumulated_income_amount"]
+    )
+    active_holdings["holding_label"] = active_holdings.apply(
+        holdings_overview_label,
+        axis=1,
+    )
+    return active_holdings.sort_values("holding_label").reset_index(drop=True)
+
+
+def add_allocation_value(holdings: pd.DataFrame) -> pd.DataFrame:
+    frame = ensure_principal_value_column(holdings)
+    value_columns = [
+        "current_value",
+        "expected_maturity_value",
+        "maturity_value",
+        "principal_amount",
+        "principal_value",
+        "book_value",
+    ]
+    for column in value_columns:
+        if column not in frame:
+            frame[column] = 0
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0)
+
+    frame["allocation_value"] = 0.0
+    for column in value_columns:
+        frame["allocation_value"] = frame["allocation_value"].where(
+            frame["allocation_value"] > 0,
+            frame[column],
+        )
+    return frame
+
+
+def investment_triangle_weighted_scores(holdings: pd.DataFrame) -> pd.DataFrame:
+    metrics = [
+        ("risk_score", "Risk"),
+        ("liquidity_score", "Liquidity"),
+        ("return_score", "Return"),
+    ]
+    rows: list[dict[str, float | str | int]] = []
+    for index, (column, label) in enumerate(metrics):
+        scored = holdings[
+            holdings["allocation_value"].gt(0) & holdings[column].notna()
+        ].copy()
+        total_weight = float(scored["allocation_value"].sum()) if not scored.empty else 0.0
+        weighted_score = (
+            float((scored["allocation_value"] * scored[column]).sum()) / total_weight
+            if total_weight > 0
+            else 0.0
+        )
+        coverage_weight = total_weight
+        coverage_pct = (
+            total_weight / float(holdings["allocation_value"].sum())
+            if not holdings.empty and float(holdings["allocation_value"].sum()) > 0
+            else 0.0
+        )
+        rows.append(
+            {
+                "axis": label,
+                "score": weighted_score,
+                "sort_order": index,
+                "coverage_weight": coverage_weight,
+                "coverage_pct": coverage_pct,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def investment_triangle_distribution(
+    holdings: pd.DataFrame,
+    score_column: str,
+    label: str,
+) -> pd.DataFrame:
+    frame = holdings[
+        holdings["allocation_value"].gt(0) & holdings[score_column].notna()
+    ].copy()
+    if frame.empty:
+        return pd.DataFrame(
+            {
+                "bucket": list(range(11)),
+                "allocation_value": [0.0] * 11,
+                "score_type": [label] * 11,
+            }
+        )
+
+    frame["bucket"] = frame[score_column].round().clip(0, 10).astype(int)
+    distribution = (
+        frame.groupby("bucket", as_index=False)["allocation_value"]
+        .sum()
+        .sort_values("bucket")
+    )
+    distribution = distribution.set_index("bucket").reindex(range(11), fill_value=0.0).reset_index()
+    distribution["score_type"] = label
+    return distribution
 
 
 def holding_symbol_options(holdings: pd.DataFrame) -> list[str]:
@@ -790,6 +1393,126 @@ def render_total_gain_rate_donut(gain_rate: float | None) -> None:
         .encode(text="label:N")
     )
     st.altair_chart((chart + label).properties(height=210), width="stretch")
+
+
+def svg_triangle_radar(weighted_scores: pd.DataFrame) -> str:
+    axis_order = ["Risk", "Liquidity", "Return"]
+    values = {
+        row["axis"]: float(row["score"])
+        for row in weighted_scores.to_dict("records")
+    }
+    width = 420
+    height = 380
+    cx = width / 2
+    cy = height / 2 + 8
+    radius = 130
+    angles = {
+        "Risk": -90,
+        "Liquidity": 30,
+        "Return": 150,
+    }
+
+    def point(axis: str, scale: float) -> tuple[float, float]:
+        angle = angles[axis] * 3.141592653589793 / 180.0
+        return (
+            cx + radius * scale * __import__("math").cos(angle),
+            cy + radius * scale * __import__("math").sin(angle),
+        )
+
+    grid_levels = [0.25, 0.5, 0.75, 1.0]
+    grid_polygons = []
+    for level in grid_levels:
+        coords = [point(axis, level) for axis in axis_order]
+        grid_polygons.append(
+            " ".join(f"{x:.1f},{y:.1f}" for x, y in coords)
+        )
+
+    data_coords = [
+        point(axis, max(0.0, min(10.0, values.get(axis, 0.0))) / 10.0)
+        for axis in axis_order
+    ]
+    data_polygon = " ".join(f"{x:.1f},{y:.1f}" for x, y in data_coords)
+
+    axis_lines = []
+    axis_labels = []
+    tick_labels = []
+    for axis in axis_order:
+        x, y = point(axis, 1.0)
+        axis_lines.append(
+            f'<line class="triangle-axis" x1="{cx:.1f}" y1="{cy:.1f}" x2="{x:.1f}" y2="{y:.1f}" stroke-width="1.5" />'
+        )
+        lx, ly = point(axis, 1.16)
+        axis_labels.append(
+            f'<text class="triangle-axis-label" x="{lx:.1f}" y="{ly:.1f}" font-size="15" font-weight="600" text-anchor="middle">{axis}</text>'
+        )
+
+    for level, label in zip(grid_levels, ["2.5", "5", "7.5", "10"]):
+        tx, ty = point("Risk", level)
+        tick_labels.append(
+            f'<text class="triangle-tick-label" x="{tx + 10:.1f}" y="{ty + 4:.1f}" font-size="11">{label}</text>'
+        )
+
+    value_badges = []
+    for axis in axis_order:
+        vx, vy = point(axis, max(0.0, min(10.0, values.get(axis, 0.0))) / 10.0)
+        value_badges.append(
+            f'<circle class="triangle-point" cx="{vx:.1f}" cy="{vy:.1f}" r="4.5" />'
+            f'<text class="triangle-value-label" x="{vx:.1f}" y="{vy - 10:.1f}" font-size="12" text-anchor="middle">{values.get(axis, 0.0):.1f}</text>'
+        )
+
+    return f"""
+    <style>
+      .triangle-radar {{
+        --triangle-bg: var(--background-color, #ffffff);
+        --triangle-grid: color-mix(in srgb, var(--text-color, #0f172a) 18%, transparent);
+        --triangle-axis: color-mix(in srgb, var(--text-color, #0f172a) 55%, transparent);
+        --triangle-axis-text: var(--text-color, #0f172a);
+        --triangle-tick-text: color-mix(in srgb, var(--text-color, #0f172a) 72%, transparent);
+        --triangle-fill: rgba(59, 130, 246, 0.22);
+        --triangle-stroke: #2563eb;
+        --triangle-point: #1d4ed8;
+        --triangle-value-text: #1e3a8a;
+      }}
+      @media (prefers-color-scheme: dark) {{
+        .triangle-radar {{
+          --triangle-fill: rgba(125, 183, 255, 0.28);
+          --triangle-stroke: #ffffff;
+          --triangle-point: #ffffff;
+          --triangle-value-text: #ffffff;
+        }}
+      }}
+      [data-theme-base="dark"] .triangle-radar,
+      [data-base-theme="dark"] .triangle-radar,
+      [data-testid="stAppViewContainer"][data-theme="dark"] .triangle-radar,
+      .stApp[data-theme="dark"] .triangle-radar,
+      .stApp[class*="dark"] .triangle-radar {{
+        --triangle-bg: #000000;
+        --triangle-fill: rgba(125, 183, 255, 0.28);
+        --triangle-stroke: #ffffff;
+        --triangle-point: #ffffff;
+        --triangle-value-text: #ffffff;
+      }}
+      .triangle-radar .triangle-bg {{ fill: var(--triangle-bg); }}
+      .triangle-radar .triangle-grid {{ fill: none; stroke: var(--triangle-grid); stroke-width: 1; }}
+      .triangle-radar .triangle-axis {{ stroke: var(--triangle-axis); }}
+      .triangle-radar .triangle-shape {{ fill: var(--triangle-fill); stroke: var(--triangle-stroke); stroke-width: 3; }}
+      .triangle-radar .triangle-point {{ fill: var(--triangle-point); }}
+      .triangle-radar .triangle-axis-label {{ fill: var(--triangle-axis-text); }}
+      .triangle-radar .triangle-tick-label {{ fill: var(--triangle-tick-text); }}
+      .triangle-radar .triangle-value-label {{ fill: var(--triangle-value-text); }}
+    </style>
+    <div class="triangle-radar" style="display:flex; justify-content:center; padding: 8px 0 22px 0;">
+      <svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="Investment triangle radar chart">
+        <rect class="triangle-bg" x="0" y="0" width="{width}" height="{height}" rx="14" ry="14" />
+        {' '.join(f'<polygon class="triangle-grid" points="{poly}" />' for poly in grid_polygons)}
+        {''.join(axis_lines)}
+        <polygon class="triangle-shape" points="{data_polygon}" />
+        {''.join(value_badges)}
+        {''.join(axis_labels)}
+        {''.join(tick_labels)}
+      </svg>
+    </div>
+    """
 
 
 def render_position_total_value_chart(
@@ -1949,6 +2672,1093 @@ def render_cash_dividend_chart(transactions: pd.DataFrame) -> None:
     st.altair_chart(chart, width="stretch")
 
 
+def account_type_label(account_type: Any) -> str:
+    if account_type is None or pd.isna(account_type):
+        return "Unknown"
+    return ACCOUNT_TYPE_LABELS.get(str(account_type), str(account_type))
+
+
+def render_account_allocation(accounts: pd.DataFrame) -> None:
+    if accounts.empty:
+        st.info("No account balance data is available yet.")
+        return
+
+    allocation = accounts.copy()
+    allocation["current_balance"] = pd.to_numeric(
+        allocation.get("current_balance"),
+        errors="coerce",
+    ).fillna(0)
+    allocation = allocation[allocation["current_balance"] > 0].copy()
+    if allocation.empty:
+        st.info("No positive account balances found.")
+        return
+
+    total_balance = float(allocation["current_balance"].sum())
+    if total_balance <= 0:
+        st.info("No positive account balances found.")
+        return
+
+    allocation["account_type_label"] = allocation["account_type"].apply(account_type_label)
+    allocation["allocation_pct"] = allocation["current_balance"] / total_balance
+    allocation["allocation_pct_display"] = allocation["allocation_pct"] * 100
+    allocation["account_label"] = allocation.apply(
+        lambda row: (
+            str(row["account_name"]).strip()
+            if not row.get("institution")
+            else f"{str(row['account_name']).strip()} ({str(row['institution']).strip()})"
+        ),
+        axis=1,
+    )
+    allocation = allocation.sort_values("current_balance", ascending=False).reset_index(
+        drop=True
+    )
+
+    chart = (
+        alt.Chart(allocation)
+        .mark_arc(innerRadius=58, outerRadius=130)
+        .encode(
+            theta=alt.Theta("current_balance:Q", stack=True),
+            color=alt.Color("account_label:N", title="Account"),
+            tooltip=[
+                alt.Tooltip("account_name:N", title="Account"),
+                alt.Tooltip("institution:N", title="Institution"),
+                alt.Tooltip("account_type_label:N", title="Account type"),
+                alt.Tooltip("current_balance:Q", title="Balance", format=",.2f"),
+                alt.Tooltip("allocation_pct:Q", title="Allocation", format=".2%"),
+                alt.Tooltip("cash_balance:Q", title="Cash balance", format=",.2f"),
+                alt.Tooltip(
+                    "holdings_market_value:Q",
+                    title="Holdings value",
+                    format=",.2f",
+                ),
+            ],
+        )
+        .properties(height=380)
+    )
+    st.altair_chart(chart, width="stretch")
+    st.caption(f"Total account balance: {total_balance:,.2f}")
+    st.dataframe(
+        allocation,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "account_name": "Account",
+            "institution": "Institution",
+            "account_type_label": "Account type",
+            "current_balance": st.column_config.NumberColumn("Balance", format="%.2f"),
+            "allocation_pct_display": st.column_config.NumberColumn(
+                "Allocation",
+                format="%.2f%%",
+            ),
+            "cash_balance": st.column_config.NumberColumn(
+                "Cash",
+                format="%.2f",
+            ),
+            "holdings_market_value": st.column_config.NumberColumn(
+                "Holdings",
+                format="%.2f",
+            ),
+        },
+        column_order=[
+            "account_name",
+            "institution",
+            "account_type_label",
+            "current_balance",
+            "allocation_pct_display",
+            "cash_balance",
+            "holdings_market_value",
+        ],
+    )
+
+
+def render_account_balance_chart(accounts: pd.DataFrame) -> None:
+    if accounts.empty:
+        st.info("No account balance data is available yet.")
+        return
+
+    chart_data = accounts.copy()
+    chart_data["current_balance"] = pd.to_numeric(
+        chart_data.get("current_balance"),
+        errors="coerce",
+    ).fillna(0)
+    chart_data = chart_data[chart_data["current_balance"] != 0].copy()
+    if chart_data.empty:
+        st.info("No non-zero account balances found.")
+        return
+
+    chart_data["account_type_label"] = chart_data["account_type"].apply(account_type_label)
+    chart_data["account_label"] = chart_data.apply(
+        lambda row: (
+            str(row["account_name"]).strip()
+            if not row.get("institution")
+            else f"{str(row['account_name']).strip()} ({str(row['institution']).strip()})"
+        ),
+        axis=1,
+    )
+    chart_data["balance_label"] = chart_data["current_balance"].map(lambda value: f"{value:,.2f}")
+    chart_data = chart_data.sort_values("current_balance", ascending=False).reset_index(
+        drop=True
+    )
+
+    text_align = "left" if (chart_data["current_balance"] >= 0).all() else "center"
+    text_dx = 6 if (chart_data["current_balance"] >= 0).all() else 0
+    chart = alt.layer(
+        alt.Chart(chart_data)
+        .mark_bar(color=chart_palette()["actual"], cornerRadiusEnd=4, opacity=0.88)
+        .encode(
+            x=alt.X("current_balance:Q", title="Balance"),
+            y=alt.Y(
+                "account_label:N",
+                title=None,
+                sort=chart_data["account_label"].tolist(),
+            ),
+            tooltip=[
+                alt.Tooltip("account_name:N", title="Account"),
+                alt.Tooltip("institution:N", title="Institution"),
+                alt.Tooltip("account_type_label:N", title="Account type"),
+                alt.Tooltip("current_balance:Q", title="Balance", format=",.2f"),
+                alt.Tooltip("cash_balance:Q", title="Cash balance", format=",.2f"),
+                alt.Tooltip(
+                    "holdings_market_value:Q",
+                    title="Holdings value",
+                    format=",.2f",
+                ),
+            ],
+        ),
+        alt.Chart(chart_data)
+        .mark_text(
+            align=text_align,
+            baseline="middle",
+            dx=text_dx,
+            color="#f9fafb" if is_dark_theme() else "#111827",
+            fontWeight="bold",
+        )
+        .encode(
+            x=alt.X("current_balance:Q"),
+            y=alt.Y("account_label:N", sort=chart_data["account_label"].tolist()),
+            text="balance_label:N",
+        ),
+    ).properties(height=max(260, 56 * len(chart_data)))
+    st.altair_chart(chart, width="stretch")
+
+
+def render_labeled_donut_chart(
+    *,
+    values: pd.DataFrame,
+    category_field: str,
+    value_field: str,
+    label_text: str,
+    color_range: list[str],
+    tooltip: list[Any],
+    height: int = 250,
+) -> None:
+    text_color = "#f9fafb" if is_dark_theme() else "#111827"
+    chart = (
+        alt.Chart(values)
+        .mark_arc(innerRadius=60, outerRadius=96)
+        .encode(
+            theta=alt.Theta(f"{value_field}:Q", stack=True),
+            color=alt.Color(
+                f"{category_field}:N",
+                scale=alt.Scale(
+                    domain=values[category_field].tolist(),
+                    range=color_range,
+                ),
+                legend=None,
+            ),
+            tooltip=tooltip,
+        )
+    )
+    label = (
+        alt.Chart(pd.DataFrame([{"label": label_text}]))
+        .mark_text(
+            size=19,
+            fontWeight="bold",
+            align="center",
+            baseline="middle",
+            color=text_color,
+        )
+        .encode(text="label:N")
+    )
+    st.altair_chart((chart + label).properties(height=height), width="stretch")
+
+
+def portfolio_horizon_bucket(midpoint_years: Any) -> str:
+    midpoint = pd.to_numeric(midpoint_years, errors="coerce")
+    if pd.isna(midpoint):
+        return "Unspecified"
+    if float(midpoint) <= 3:
+        return "Short term"
+    if float(midpoint) <= 10:
+        return "Medium term"
+    return "Long term"
+
+
+def build_global_portfolio_overview(
+    portfolios: pd.DataFrame,
+    holding_values: pd.DataFrame,
+) -> pd.DataFrame:
+    if portfolios.empty:
+        return pd.DataFrame()
+
+    active_holdings = active_detail_rows(holding_values)
+    if active_holdings.empty:
+        grouped_values = pd.DataFrame(columns=["portfolio_id", "market_value"])
+    else:
+        active_holdings = active_holdings.copy()
+        active_holdings["current_value"] = pd.to_numeric(
+            active_holdings.get("current_value"),
+            errors="coerce",
+        ).fillna(0)
+        grouped_values = (
+            active_holdings.groupby("portfolio_id", dropna=False, as_index=False)[
+                "current_value"
+            ]
+            .sum()
+            .rename(columns={"current_value": "market_value"})
+        )
+
+    overview = portfolios.copy()
+    overview = overview.merge(
+        grouped_values,
+        how="left",
+        left_on="id",
+        right_on="portfolio_id",
+    )
+    overview["market_value"] = pd.to_numeric(
+        overview.get("market_value"),
+        errors="coerce",
+    ).fillna(0)
+    overview["target_horizon_years_min"] = pd.to_numeric(
+        overview.get("target_horizon_years_min"),
+        errors="coerce",
+    )
+    overview["target_horizon_years_max"] = pd.to_numeric(
+        overview.get("target_horizon_years_max"),
+        errors="coerce",
+    )
+    overview["horizon_midpoint_years"] = (
+        overview["target_horizon_years_min"].fillna(overview["target_horizon_years_max"])
+        + overview["target_horizon_years_max"].fillna(overview["target_horizon_years_min"])
+    ) / 2
+    overview["horizon_bucket"] = overview["horizon_midpoint_years"].apply(
+        portfolio_horizon_bucket
+    )
+    overview["horizon_range_label"] = overview.apply(
+        lambda row: compact_horizon_label(
+            row.get("target_horizon_years_min"),
+            row.get("target_horizon_years_max"),
+        ),
+        axis=1,
+    )
+    total_market_value = float(overview["market_value"].sum())
+    overview["allocation_pct"] = (
+        overview["market_value"] / total_market_value if total_market_value > 0 else 0.0
+    )
+    return overview.sort_values(
+        ["market_value", "display_order", "name"],
+        ascending=[False, True, True],
+        na_position="last",
+    ).reset_index(drop=True)
+
+
+def render_global_portfolio_overview(portfolio_schema: str) -> None:
+    try:
+        portfolios = load_portfolios(portfolio_schema)
+        holding_values = load_holding_current_values(portfolio_schema)
+    except RuntimeError as error:
+        st.error(str(error))
+        return
+
+    overview = build_global_portfolio_overview(portfolios, holding_values)
+    if overview.empty:
+        st.info("No active portfolios are available yet.")
+        return
+
+    portfolio_allocation = overview[overview["market_value"] > 0].copy()
+    st.subheader("Portfolio Allocation")
+    if portfolio_allocation.empty:
+        st.info("No portfolio market values are available yet.")
+    else:
+        donut_colors = [
+            "#60a5fa",
+            "#22c55e",
+            "#f59e0b",
+            "#f87171",
+            "#a78bfa",
+            "#2dd4bf",
+            "#fb7185",
+            "#c084fc",
+        ]
+        total_market_value = float(portfolio_allocation["market_value"].sum())
+        render_labeled_donut_chart(
+            values=portfolio_allocation,
+            category_field="name",
+            value_field="market_value",
+            label_text=f"{total_market_value:,.0f}",
+            color_range=donut_colors[: len(portfolio_allocation)],
+            tooltip=[
+                alt.Tooltip("name:N", title="Portfolio"),
+                alt.Tooltip("market_value:Q", title="Market value", format=",.2f"),
+                alt.Tooltip("allocation_pct:Q", title="Allocation", format=".2%"),
+            ],
+            height=300,
+        )
+        chart_legend(
+            list(
+                zip(
+                    portfolio_allocation["name"].tolist(),
+                    donut_colors[: len(portfolio_allocation)],
+                )
+            )
+        )
+        st.caption(f"Total portfolio market value: {total_market_value:,.2f}")
+
+    st.dataframe(
+        overview[["name", "market_value", "allocation_pct", "horizon_range_label", "horizon_midpoint_years"]],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "name": "Portfolio",
+            "market_value": st.column_config.NumberColumn("Market Value", format="%.2f"),
+            "allocation_pct": st.column_config.NumberColumn("Allocation", format="%.2f%%"),
+            "horizon_range_label": "Time Horizon",
+            "horizon_midpoint_years": st.column_config.NumberColumn(
+                "Midpoint (Years)",
+                format="%.1f",
+            ),
+        },
+        column_order=[
+            "name",
+            "market_value",
+            "allocation_pct",
+            "horizon_range_label",
+            "horizon_midpoint_years",
+        ],
+    )
+
+    st.subheader("Time Horizon Allocation")
+    horizon_order = ["Short term", "Medium term", "Long term", "Unspecified"]
+    horizon_labels = {
+        "Short term": "Short term (<= 3y)",
+        "Medium term": "Medium term (3-10y)",
+        "Long term": "Long term (> 10y)",
+        "Unspecified": "Unspecified",
+    }
+    horizon_overview = overview.copy()
+    horizon_overview["bucket_label"] = horizon_overview["horizon_bucket"].map(horizon_labels)
+    bucket_totals = (
+        horizon_overview.groupby(["horizon_bucket", "bucket_label"], as_index=False)
+        .agg(
+            market_value=("market_value", "sum"),
+            portfolio_count=("id", "count"),
+        )
+    )
+    bucket_totals["bucket_order"] = bucket_totals["horizon_bucket"].map(
+        {bucket: index for index, bucket in enumerate(horizon_order)}
+    )
+    bucket_totals = bucket_totals.sort_values("bucket_order").reset_index(drop=True)
+    bucket_totals["value_label"] = bucket_totals["market_value"].map(lambda value: f"{value:,.2f}")
+
+    if bucket_totals.empty or float(bucket_totals["market_value"].sum()) <= 0:
+        st.info("No time horizon allocation data is available yet.")
+    else:
+        palette = {
+            "Short term (<= 3y)": "#60a5fa",
+            "Medium term (3-10y)": "#f59e0b",
+            "Long term (> 10y)": "#22c55e",
+            "Unspecified": "#94a3b8",
+        }
+        chart = alt.layer(
+            alt.Chart(bucket_totals)
+            .mark_bar(cornerRadiusEnd=6)
+            .encode(
+                y=alt.Y(
+                    "bucket_label:N",
+                    title="Time horizon bucket",
+                    sort=bucket_totals["bucket_label"].tolist(),
+                ),
+                x=alt.X("market_value:Q", title="Market value"),
+                color=alt.Color(
+                    "bucket_label:N",
+                    scale=alt.Scale(
+                        domain=list(palette.keys()),
+                        range=list(palette.values()),
+                    ),
+                    legend=None,
+                ),
+                tooltip=[
+                    alt.Tooltip("bucket_label:N", title="Bucket"),
+                    alt.Tooltip("market_value:Q", title="Market value", format=",.2f"),
+                    alt.Tooltip("portfolio_count:Q", title="Portfolios"),
+                ],
+            ),
+            alt.Chart(bucket_totals)
+            .mark_text(
+                dx=8,
+                align="left",
+                baseline="middle",
+                fontWeight="bold",
+                color="#f9fafb" if is_dark_theme() else "#111827",
+            )
+            .encode(
+                y=alt.Y("bucket_label:N", sort=bucket_totals["bucket_label"].tolist()),
+                x=alt.X("market_value:Q"),
+                text="value_label:N",
+            ),
+        ).properties(height=320)
+        st.altair_chart(chart, width="stretch")
+        chart_legend(list(palette.items()))
+
+    st.caption(
+        "Time horizon buckets use each portfolio's horizon midpoint: (min years + max years) / 2."
+    )
+    st.dataframe(
+        overview[
+            [
+                "name",
+                "horizon_range_label",
+                "horizon_midpoint_years",
+                "horizon_bucket",
+                "market_value",
+            ]
+        ],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "name": "Portfolio",
+            "horizon_range_label": "Time Horizon",
+            "horizon_midpoint_years": st.column_config.NumberColumn(
+                "Midpoint (Years)",
+                format="%.1f",
+            ),
+            "horizon_bucket": "Bucket",
+            "market_value": st.column_config.NumberColumn("Market Value", format="%.2f"),
+        },
+        column_order=[
+            "name",
+            "horizon_range_label",
+            "horizon_midpoint_years",
+            "horizon_bucket",
+            "market_value",
+        ],
+    )
+
+
+def render_tax_advantaged_coverage(accounts: pd.DataFrame) -> None:
+    if accounts.empty:
+        st.info("No account balance data is available yet.")
+        return
+
+    balances = accounts.copy()
+    balances["current_balance"] = pd.to_numeric(
+        balances.get("current_balance"),
+        errors="coerce",
+    ).fillna(0)
+    total_balance = float(balances["current_balance"].sum())
+    if total_balance <= 0:
+        st.info("No positive account balances found.")
+        return
+
+    protected_balance = float(
+        balances[
+            balances["account_type"].isin(REGISTERED_ACCOUNT_TYPES)
+        ]["current_balance"].sum()
+    )
+    unprotected_balance = max(total_balance - protected_balance, 0.0)
+    coverage_pct = protected_balance / total_balance if total_balance > 0 else 0.0
+    chart_data = pd.DataFrame(
+        [
+            {"segment": "Protected", "value": protected_balance},
+            {"segment": "Unprotected", "value": unprotected_balance},
+        ]
+    )
+    palette = chart_palette()
+    render_labeled_donut_chart(
+        values=chart_data,
+        category_field="segment",
+        value_field="value",
+        label_text=f"{coverage_pct:.0%}",
+        color_range=[palette["target_growth"], "rgba(148, 163, 184, 0.28)"],
+        tooltip=[
+            alt.Tooltip("segment:N", title="Segment"),
+            alt.Tooltip("value:Q", title="Balance", format=",.2f"),
+        ],
+        height=260,
+    )
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Protected balance", format_optional_number(protected_balance))
+    col2.metric("Total account balance", format_optional_number(total_balance))
+    col3.metric("Coverage", f"{coverage_pct:.2%}")
+
+    by_wrapper = (
+        balances[balances["account_type"].isin(REGISTERED_ACCOUNT_TYPES)]
+        .groupby("account_type", as_index=False)["current_balance"]
+        .sum()
+    )
+    if not by_wrapper.empty:
+        by_wrapper["wrapper_label"] = by_wrapper["account_type"].apply(account_type_label)
+        st.dataframe(
+            by_wrapper,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "wrapper_label": "Registered account",
+                "current_balance": st.column_config.NumberColumn(
+                    "Protected balance",
+                    format="%.2f",
+                ),
+            },
+            column_order=["wrapper_label", "current_balance"],
+        )
+
+
+def render_return_vs_inflation_page(price_schema: str) -> None:
+    try:
+        inflation = load_canada_inflation(price_schema)
+    except RuntimeError as error:
+        st.error(str(error))
+        return
+
+    st.subheader("Canada Inflation")
+    st.caption(
+        "The chart itself is not implemented yet. Public mode stays read-only and displays the saved Canada inflation rows that will feed the future return-vs-inflation view."
+    )
+
+    latest_row = inflation.iloc[0] if not inflation.empty else None
+    metric_cols = st.columns(3)
+    metric_cols[0].metric(
+        "Latest inflation rate",
+        (
+            f"{float(latest_row['inflation_rate']):.2f}%"
+            if latest_row is not None and pd.notna(latest_row.get("inflation_rate"))
+            else "Not set"
+        ),
+    )
+    metric_cols[1].metric(
+        "Latest observation month",
+        (
+            pd.to_datetime(latest_row["observation_month"]).strftime("%Y-%m")
+            if latest_row is not None and pd.notna(latest_row.get("observation_month"))
+            else "Not set"
+        ),
+    )
+    metric_cols[2].metric("Rows stored", f"{len(inflation):,}")
+
+    if inflation.empty:
+        st.info("No Canada inflation rows have been entered yet.")
+        return
+
+    st.info("Return-vs-inflation chart is not implemented yet. The inflation data layer is ready.")
+    display = inflation.copy()
+    display["observation_month_label"] = display["observation_month"].dt.strftime("%Y-%m")
+    st.dataframe(
+        display,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "observation_month_label": "Observation Month",
+            "inflation_rate": st.column_config.NumberColumn(
+                "Inflation Rate",
+                format="%.2f%%",
+            ),
+            "source": "Source",
+            "notes": "Notes",
+            "updated_at": st.column_config.DatetimeColumn("Updated At"),
+        },
+        column_order=[
+            "observation_month_label",
+            "inflation_rate",
+            "source",
+            "notes",
+            "updated_at",
+        ],
+    )
+
+
+def render_registered_room_card(status_row: pd.Series) -> None:
+    wrapper_label = account_type_label(status_row.get("wrapper_type"))
+    total_room_raw = pd.to_numeric(status_row.get("total_room"), errors="coerce")
+    used_room_raw = pd.to_numeric(status_row.get("used_room"), errors="coerce")
+    total_room = 0.0 if pd.isna(total_room_raw) else float(total_room_raw)
+    used_room = 0.0 if pd.isna(used_room_raw) else float(used_room_raw)
+    remaining_room = max(total_room - used_room, 0.0)
+    overused_room = max(used_room - total_room, 0.0)
+    chart_used = min(used_room, total_room) if total_room > 0 else 0.0
+    chart_remaining = max(total_room - chart_used, 0.0)
+    palette = chart_palette()
+
+    st.subheader(f"{wrapper_label} Room")
+    if total_room > 0:
+        render_labeled_donut_chart(
+            values=pd.DataFrame(
+                [
+                    {"segment": "Used", "value": chart_used},
+                    {"segment": "Remaining", "value": chart_remaining},
+                ]
+            ),
+            category_field="segment",
+            value_field="value",
+            label_text=f"{(used_room / total_room):.0%}",
+            color_range=[palette["actual"], "rgba(148, 163, 184, 0.28)"],
+            tooltip=[
+                alt.Tooltip("segment:N", title="Segment"),
+                alt.Tooltip("value:Q", title="Room", format=",.2f"),
+            ],
+            height=240,
+        )
+    else:
+        st.info("No total room value has been set yet.")
+
+    col1, col2 = st.columns(2)
+    col1.metric("Used room", format_optional_number(used_room))
+    col2.metric("Remaining room", format_optional_number(remaining_room))
+    col3, col4 = st.columns(2)
+    col3.metric("Total room", format_optional_number(total_room))
+    col4.metric("Protected balance", format_optional_number(status_row.get("protected_balance")))
+    if overused_room > 0:
+        st.warning(f"{wrapper_label} is over room by {overused_room:,.2f}.")
+    notes = status_row.get("notes")
+    if notes is not None and not pd.isna(notes) and str(notes).strip():
+        st.caption(str(notes).strip())
+
+
+def render_tax_benefit_details(
+    accounts: pd.DataFrame,
+    room_status: pd.DataFrame,
+) -> None:
+    st.subheader("Tax Advantaged Coverage")
+    render_tax_advantaged_coverage(accounts)
+
+    status_by_wrapper = {
+        str(row["wrapper_type"]): row for _, row in room_status.iterrows()
+    } if not room_status.empty else {}
+
+    wrapper_cols = st.columns(len(REGISTERED_ACCOUNT_TYPES))
+    for column, wrapper_type in zip(wrapper_cols, REGISTERED_ACCOUNT_TYPES):
+        with column:
+            row = status_by_wrapper.get(wrapper_type)
+            if row is None:
+                row = pd.Series(
+                    {
+                        "wrapper_type": wrapper_type,
+                        "total_room": 0,
+                        "used_room": 0,
+                        "remaining_room": 0,
+                        "protected_balance": 0,
+                    }
+                )
+            render_registered_room_card(row)
+
+
+def render_holdings_principal_vs_growth(
+    holding_values: pd.DataFrame,
+    transactions: pd.DataFrame | None = None,
+) -> None:
+    overview = active_holdings_overview_rows(holding_values, transactions)
+    if overview.empty:
+        st.info("No active holdings found for principal vs growth.")
+        return
+
+    palette = chart_palette()
+
+    view_mode = st.radio(
+        "View Mode",
+        ["View by Portfolio", "View by Asset Type"],
+        horizontal=True,
+        key="holdings_principal_growth_view_mode",
+    )
+
+    overview["portfolio_filter_label"] = overview["portfolio_name"].fillna(
+        "Unknown portfolio"
+    ).astype(str)
+    overview["asset_type_filter_label"] = overview["asset_type"].apply(asset_type_label)
+    overview["display_name"] = overview.apply(holdings_display_name, axis=1)
+
+    filter_col, _ = st.columns([1, 2.2])
+    if view_mode == "View by Portfolio":
+        selected_portfolio = filter_col.selectbox(
+            "Filter",
+            sorted(overview["portfolio_filter_label"].unique().tolist()),
+            key="holdings_principal_growth_portfolio",
+        )
+        overview = overview[
+            overview["portfolio_filter_label"] == selected_portfolio
+        ].copy()
+    else:
+        selected_asset_type = filter_col.selectbox(
+            "Filter",
+            sorted(overview["asset_type_filter_label"].unique().tolist()),
+            key="holdings_principal_growth_asset_type",
+        )
+        overview = overview[
+            overview["asset_type_filter_label"] == selected_asset_type
+        ].copy()
+
+    if overview.empty:
+        st.info("No holdings matched the selected filter.")
+        return
+
+    overview["holding_axis_label"] = overview.apply(
+        lambda row: principal_growth_axis_name(row, view_mode),
+        axis=1,
+    )
+
+    chart_rows = pd.DataFrame(
+        [
+            {
+                "holding_axis_label": row["holding_axis_label"],
+                "holding_label": row["holding_label"],
+                "portfolio_name": row["portfolio_filter_label"],
+                "asset_type_label": row["asset_type_filter_label"],
+                "component": "Principal Value",
+                "value": row["principal_value"],
+                "value_label": f"{row['principal_value']:,.2f}",
+            }
+            for _, row in overview.iterrows()
+        ]
+        + [
+            {
+                "holding_axis_label": row["holding_axis_label"],
+                "holding_label": row["holding_label"],
+                "portfolio_name": row["portfolio_filter_label"],
+                "asset_type_label": row["asset_type_filter_label"],
+                "component": "Growth Value",
+                "value": row["growth_value"],
+                "value_label": f"{row['growth_value']:,.2f}",
+            }
+            for _, row in overview.iterrows()
+        ]
+    )
+    chart_rows = chart_rows[chart_rows["value"] != 0].copy()
+    if chart_rows.empty:
+        st.info("No principal or growth values found for active holdings.")
+        return
+
+    label_threshold = max(float(overview["current_value"].abs().max()) * 0.08, 250.0)
+    principal_inside_rows: list[dict[str, Any]] = []
+    principal_outside_rows: list[dict[str, Any]] = []
+    growth_inside_rows: list[dict[str, Any]] = []
+    growth_outside_rows: list[dict[str, Any]] = []
+    for _, row in overview.iterrows():
+        axis_label = row["holding_axis_label"]
+        principal_value = float(row["principal_value"])
+        growth_value = float(row["growth_value"])
+
+        if principal_value != 0:
+            principal_inside = abs(principal_value) >= label_threshold
+            target_rows = principal_inside_rows if principal_inside else principal_outside_rows
+            target_rows.append(
+                {
+                    "holding_axis_label": axis_label,
+                    "text": f"{principal_value:,.2f}",
+                    "x": principal_value / 2 if principal_inside else principal_value,
+                }
+            )
+
+        if growth_value != 0 and round(growth_value, 2) != 0:
+            if growth_value > 0:
+                growth_inside = abs(growth_value) >= label_threshold
+                growth_end = principal_value + growth_value
+                (growth_inside_rows if growth_inside else growth_outside_rows).append(
+                    {
+                        "holding_axis_label": axis_label,
+                        "text": f"{growth_value:,.2f}",
+                        "x": principal_value + (growth_value / 2) if growth_inside else growth_end,
+                        "is_negative": False,
+                    }
+                )
+            else:
+                growth_inside = abs(growth_value) >= label_threshold
+                (growth_inside_rows if growth_inside else growth_outside_rows).append(
+                    {
+                        "holding_axis_label": axis_label,
+                        "text": f"{growth_value:,.2f}",
+                        "x": growth_value / 2 if growth_inside else growth_value,
+                        "is_negative": True,
+                    }
+                )
+
+    bar_chart = (
+        alt.Chart(chart_rows)
+        .mark_bar(cornerRadiusEnd=4)
+        .encode(
+            y=alt.Y(
+                "holding_axis_label:N",
+                title="Holding",
+                sort=overview["holding_axis_label"].tolist(),
+            ),
+            x=alt.X("value:Q", title="Amount"),
+            color=alt.Color(
+                "component:N",
+                scale=alt.Scale(
+                    domain=["Principal Value", "Growth Value"],
+                    range=[palette["actual"], palette["target_growth"]],
+                ),
+                legend=None,
+            ),
+            tooltip=[
+                alt.Tooltip("holding_axis_label:N", title="Name"),
+                alt.Tooltip("portfolio_name:N", title="Portfolio"),
+                alt.Tooltip("asset_type_label:N", title="Asset type"),
+                alt.Tooltip("holding_label:N", title="Holding detail"),
+                alt.Tooltip("component:N", title="Component"),
+                alt.Tooltip("value:Q", title="Amount", format=",.2f"),
+            ],
+        )
+    )
+    label_layers: list[Any] = []
+    if principal_inside_rows:
+        label_layers.append(
+            alt.Chart(pd.DataFrame(principal_inside_rows))
+            .mark_text(fontSize=11, fontWeight="bold", color="#f9fafb", align="center")
+            .encode(
+                y=alt.Y("holding_axis_label:N", sort=overview["holding_axis_label"].tolist()),
+                x=alt.X("x:Q"),
+                text="text:N",
+            )
+        )
+    if principal_outside_rows:
+        label_layers.append(
+            alt.Chart(pd.DataFrame(principal_outside_rows))
+            .mark_text(fontSize=11, fontWeight="bold", color="#f9fafb", align="left", dx=8)
+            .encode(
+                y=alt.Y("holding_axis_label:N", sort=overview["holding_axis_label"].tolist()),
+                x=alt.X("x:Q"),
+                text="text:N",
+            )
+        )
+    if growth_inside_rows:
+        label_layers.append(
+            alt.Chart(pd.DataFrame(growth_inside_rows))
+            .mark_text(fontSize=11, fontWeight="bold", color="#f9fafb", align="center")
+            .encode(
+                y=alt.Y("holding_axis_label:N", sort=overview["holding_axis_label"].tolist()),
+                x=alt.X("x:Q"),
+                text="text:N",
+            )
+        )
+    if growth_outside_rows:
+        outside_growth = pd.DataFrame(growth_outside_rows)
+        positive_growth = outside_growth[~outside_growth["is_negative"]]
+        negative_growth = outside_growth[outside_growth["is_negative"]]
+        if not positive_growth.empty:
+            label_layers.append(
+                alt.Chart(positive_growth)
+                .mark_text(
+                    fontSize=11,
+                    fontWeight="bold",
+                    color=palette["target_growth"],
+                    align="left",
+                    dx=8,
+                )
+                .encode(
+                    y=alt.Y("holding_axis_label:N", sort=overview["holding_axis_label"].tolist()),
+                    x=alt.X("x:Q"),
+                    text="text:N",
+                )
+            )
+        if not negative_growth.empty:
+            label_layers.append(
+                alt.Chart(negative_growth)
+                .mark_text(
+                    fontSize=11,
+                    fontWeight="bold",
+                    color=palette["target_growth"],
+                    align="right",
+                    dx=-8,
+                )
+                .encode(
+                    y=alt.Y("holding_axis_label:N", sort=overview["holding_axis_label"].tolist()),
+                    x=alt.X("x:Q"),
+                    text="text:N",
+                )
+            )
+    chart = bar_chart
+    for layer in label_layers:
+        chart = chart + layer
+    st.altair_chart(
+        chart.properties(height=max(320, 44 * len(overview))),
+        width="stretch",
+    )
+    chart_legend(
+        [
+            ("Principal Value", palette["actual"]),
+            ("Growth Value", palette["target_growth"]),
+        ]
+    )
+
+
+def render_holdings_expected_return_rate(holding_values: pd.DataFrame) -> None:
+    overview = active_holdings_overview_rows(holding_values)
+    if overview.empty:
+        st.info("No active holdings found for expected return rate.")
+        return
+
+    comparison = overview[["holding_label", "expected_return_rate"]].copy()
+    comparison = comparison.dropna(subset=["expected_return_rate"])
+    if comparison.empty:
+        st.info("No expected return rates have been set for active holdings.")
+        return
+
+    comparison = comparison.sort_values(
+        "expected_return_rate",
+        ascending=False,
+        na_position="last",
+    ).reset_index(drop=True)
+    st.dataframe(
+        comparison,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "holding_label": "Holding",
+            "expected_return_rate": st.column_config.NumberColumn(
+                "Expected Return Rate",
+                format="%.2f%%",
+            ),
+        },
+        column_order=["holding_label", "expected_return_rate"],
+    )
+
+
+def render_global_investment_triangle(portfolio_schema: str) -> None:
+    try:
+        holding_values = load_holding_current_values(portfolio_schema)
+    except RuntimeError as error:
+        st.error(str(error))
+        return
+
+    active_holdings = active_detail_rows(holding_values)
+    if active_holdings.empty:
+        st.info("No active holdings found for investment triangle.")
+        return
+
+    active_holdings = add_allocation_value(active_holdings)
+    active_holdings = active_holdings[active_holdings["allocation_value"] > 0].copy()
+    if active_holdings.empty:
+        st.info("No positive holding allocation values found across portfolios.")
+        return
+
+    score_columns = ["risk_score", "liquidity_score", "return_score"]
+    for column in [*score_columns, "allocation_value", "current_value"]:
+        if column not in active_holdings:
+            active_holdings[column] = pd.NA
+        active_holdings[column] = pd.to_numeric(
+            active_holdings[column],
+            errors="coerce",
+        )
+
+    weighted_scores = investment_triangle_weighted_scores(active_holdings)
+    total_value = float(active_holdings["allocation_value"].sum())
+    scored_value = float(
+        active_holdings[
+            active_holdings[score_columns].notna().any(axis=1)
+        ]["allocation_value"].sum()
+    )
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Current total value", f"{total_value:,.2f}")
+    metric_cols[1].metric(
+        "Weighted risk",
+        f"{float(weighted_scores.loc[weighted_scores['axis'] == 'Risk', 'score'].iloc[0]):.1f}",
+    )
+    metric_cols[2].metric(
+        "Weighted liquidity",
+        f"{float(weighted_scores.loc[weighted_scores['axis'] == 'Liquidity', 'score'].iloc[0]):.1f}",
+    )
+    metric_cols[3].metric(
+        "Weighted return",
+        f"{float(weighted_scores.loc[weighted_scores['axis'] == 'Return', 'score'].iloc[0]):.1f}",
+    )
+
+    components.html(svg_triangle_radar(weighted_scores), height=430, scrolling=False)
+    st.caption(
+        "Scores are weighted by current holding value across all active holdings. Missing scores are excluded from that dimension's weighted average."
+    )
+    st.caption(
+        f"Scored current value coverage: {scored_value:,.2f} of {total_value:,.2f} current value."
+    )
+
+    distribution_specs = [
+        ("return_score", "Return"),
+        ("liquidity_score", "Liquidity"),
+        ("risk_score", "Risk"),
+    ]
+    for score_column, label in distribution_specs:
+        st.subheader(f"{label} Allocation")
+        distribution = investment_triangle_distribution(
+            active_holdings,
+            score_column,
+            label,
+        )
+        chart = (
+            alt.Chart(distribution)
+            .mark_bar()
+            .encode(
+                x=alt.X("bucket:O", title=f"{label} score bucket"),
+                y=alt.Y("allocation_value:Q", title="Current value"),
+                tooltip=[
+                    alt.Tooltip("bucket:O", title="Score bucket"),
+                    alt.Tooltip("allocation_value:Q", title="Current value", format=",.2f"),
+                ],
+            )
+            .properties(height=260)
+        )
+        st.altair_chart(chart, width="stretch")
+
+        detail_rows = active_holdings[active_holdings[score_column].notna()].copy()
+        if detail_rows.empty:
+            st.info(f"No holdings have a {label.lower()} score yet.")
+            continue
+
+        detail_rows["bucket"] = detail_rows[score_column].round().clip(0, 10).astype(int)
+        detail_rows["holding_label"] = detail_rows.apply(
+            lambda row: (
+                str(row.get("portfolio_name")).strip()
+                if pd.notna(row.get("portfolio_name")) and str(row.get("portfolio_name")).strip()
+                else "Unknown portfolio"
+            )
+            + " - "
+            + (
+                str(row.get("asset_name")).strip()
+                if pd.notna(row.get("asset_name")) and str(row.get("asset_name")).strip()
+                else f"Holding {int(row['id'])}"
+            )
+            + (
+                f" - {str(row.get('holding_name')).strip()}"
+                if pd.notna(row.get("holding_name")) and str(row.get("holding_name")).strip()
+                else ""
+            ),
+            axis=1,
+        )
+        st.dataframe(
+            detail_rows[
+                [
+                    "holding_label",
+                    "asset_type",
+                    score_column,
+                    "bucket",
+                    "allocation_value",
+                ]
+            ].sort_values(["bucket", "allocation_value"], ascending=[False, False]),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "holding_label": "Holding",
+                "asset_type": "Asset type",
+                score_column: st.column_config.NumberColumn(
+                    f"{label} score",
+                    format="%.1f",
+                ),
+                "bucket": st.column_config.NumberColumn("Score bucket", format="%d"),
+                "allocation_value": st.column_config.NumberColumn(
+                    "Current value",
+                    format="%.2f",
+                ),
+            },
+        )
+
+
 def render_cash_page(
     price_schema: str,
     portfolio_schema: str,
@@ -2260,17 +4070,22 @@ def render_market_research_page(price_schema: str) -> None:
     render_average_volume_chart(symbol, display_prices)
 
 
-def render_placeholder_section(section: str, price_schema: str | None = None) -> None:
+def render_placeholder_section(
+    section: str,
+    price_schema: str | None = None,
+    portfolio_schema: str | None = None,
+) -> None:
     subpages = SECTION_SUBPAGES[section]
     for tab, subpage in zip(st.tabs(subpages), subpages):
         with tab:
-            render_section_subpage(section, subpage, price_schema)
+            render_section_subpage(section, subpage, price_schema, portfolio_schema)
 
 
 def render_section_subpage(
     section: str,
     subpage: str,
     price_schema: str | None = None,
+    portfolio_schema: str | None = None,
 ) -> None:
     if section == SECTION_RESEARCH and subpage == "Comparison":
         if price_schema is None:
@@ -2286,41 +4101,63 @@ def render_section_subpage(
         render_market_research_page(price_schema)
         return
 
+    if section == SECTION_OVERVIEW and subpage == "Investment Triangle":
+        if portfolio_schema is None:
+            st.info("Portfolio schema is not configured.")
+            return
+        st.subheader(f"{section} - Investment Triangle")
+        render_global_investment_triangle(portfolio_schema)
+        return
+
+    if section == SECTION_OVERVIEW and subpage == "Return vs Inflation":
+        if price_schema is None:
+            st.info("Price schema is not configured.")
+            return
+        st.subheader(f"{section} - Return vs Inflation")
+        render_return_vs_inflation_page(price_schema)
+        return
+
     if subpage == "Investment Triangle":
         render_investment_triangle_placeholder(section)
         return
 
     if section == SECTION_OVERVIEW and subpage == "Portfolio Overview":
-        st.subheader("Portfolio Allocation")
-        st.info("Placeholder. This section is ready for portfolio allocation data.")
-
-        st.subheader("Time Horizon Allocation")
-        st.info(
-            "Placeholder. This section is ready for short, medium, and long term "
-            "portfolio allocation data."
-        )
+        if portfolio_schema is None:
+            st.info("Portfolio schema is not configured.")
+            return
+        st.subheader(f"{section} - Portfolio Overview")
+        render_global_portfolio_overview(portfolio_schema)
         return
 
     if section == SECTION_ACCOUNTS_TAX and subpage == "Account Details":
+        if portfolio_schema is None:
+            st.info("Portfolio schema is not configured.")
+            return
+        try:
+            accounts = load_accounts(portfolio_schema)
+        except RuntimeError as error:
+            st.error(str(error))
+            return
+
         st.subheader("Account Allocation")
-        st.info("Placeholder. This section is ready for account allocation data.")
+        render_account_allocation(accounts)
 
         st.subheader("Account Balances")
-        st.info("Placeholder. This section is ready for account balance data.")
+        render_account_balance_chart(accounts)
         return
 
     if section == SECTION_ACCOUNTS_TAX and subpage == "Tax Benefit Details":
-        st.subheader("Tax Advantaged Coverage")
-        st.info("Placeholder. This section is ready for tax advantaged coverage data.")
+        if portfolio_schema is None:
+            st.info("Portfolio schema is not configured.")
+            return
+        try:
+            accounts = load_accounts(portfolio_schema)
+            room_status = load_registered_account_room_status(portfolio_schema)
+        except RuntimeError as error:
+            st.error(str(error))
+            return
 
-        st.subheader("TFSA Room")
-        st.info("Placeholder. This section is ready for TFSA contribution room data.")
-
-        st.subheader("RRSP Room")
-        st.info("Placeholder. This section is ready for RRSP contribution room data.")
-
-        st.subheader("FHSA Room")
-        st.info("Placeholder. This section is ready for FHSA participation room data.")
+        render_tax_benefit_details(accounts, room_status)
         return
 
     st.subheader(subpage)
@@ -2375,17 +4212,24 @@ def render_holdings_section(
     portfolio_schema: str,
     assets: pd.DataFrame,
 ) -> None:
+    try:
+        holding_values = load_holding_current_values(portfolio_schema)
+        holding_transactions = load_holding_transactions_current(portfolio_schema)
+    except RuntimeError as error:
+        st.error(str(error))
+        st.stop()
+
     principal_growth_tab, yield_rate_tab, details_tab = st.tabs(
-        ["Principal vs Growth", "Yield Rate", "Details"]
+        ["Principal vs Growth", "Expected Return Rate", "Details"]
     )
 
     with principal_growth_tab:
         st.subheader("Principal vs Growth")
-        st.info("Placeholder. This section is ready for principal vs growth data.")
+        render_holdings_principal_vs_growth(holding_values, holding_transactions)
 
     with yield_rate_tab:
-        st.subheader("Yield Rate Comparison")
-        st.info("Placeholder. This section is ready for holding yield rate comparison.")
+        st.subheader("Expected Return Rate")
+        render_holdings_expected_return_rate(holding_values)
 
     try:
         all_holdings = load_holdings(portfolio_schema)
@@ -2475,7 +4319,7 @@ def main() -> None:
     st.title(section)
 
     if section in SECTION_SUBPAGES:
-        render_placeholder_section(section, price_schema)
+        render_placeholder_section(section, price_schema, portfolio_schema)
         return
 
     if section in portfolio_pages:
