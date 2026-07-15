@@ -76,9 +76,14 @@ HISTORY_WINDOW_OPTIONS = {
     "18 Months": 545,
     "2 Years": 730,
 }
+PORTFOLIO_TAB_PROGRESS = "Funding Progress"
+PORTFOLIO_TAB_RETURN_VS_INFLATION = "Return vs Inflation"
+PORTFOLIO_TAB_ASSET_ALLOCATION = "Asset Allocation"
+PORTFOLIO_TAB_TARGET_VS_ACTUAL = "Target vs Actual Allocation"
 PORTFOLIO_SUBPAGES = [
-    "Asset Type Allocation",
-    "Target vs Actual Allocation",
+    PORTFOLIO_TAB_PROGRESS,
+    PORTFOLIO_TAB_RETURN_VS_INFLATION,
+    PORTFOLIO_TAB_ASSET_ALLOCATION,
     "Investment Triangle",
 ]
 PORTFOLIO_SELECT_COLUMNS = (
@@ -605,7 +610,7 @@ def load_holding_current_values(portfolio_schema: str) -> pd.DataFrame:
                 "expected_maturity_value,notes,active,archived,display_order,"
                 "created_at,updated_at",
             ),
-            ("order", "portfolio_name.asc,asset_name.asc"),
+            ("order", "portfolio_name.asc,display_order.asc,asset_name.asc,holding_name.asc,id.asc"),
         ),
         access_token,
     )
@@ -870,13 +875,8 @@ def portfolio_initials(name: Any) -> str:
 
 
 def principal_growth_axis_name(row: pd.Series | dict[str, Any], view_mode: str) -> str:
-    holding_name = holdings_display_name(row)
-    if view_mode == "View by Portfolio":
-        ticker = row.get("ticker")
-        if ticker is not None and not pd.isna(ticker) and str(ticker).strip():
-            return f"{str(ticker).strip()} {holding_name}"
-        return holding_name
-    return f"{portfolio_initials(row.get('portfolio_name'))} {holding_name}"
+    del view_mode
+    return holdings_display_name(row)
 
 
 def holding_principal_adjustments(
@@ -1035,7 +1035,37 @@ def active_holdings_overview_rows(
         holdings_overview_label,
         axis=1,
     )
-    return active_holdings.sort_values("holding_label").reset_index(drop=True)
+    return sort_by_available_columns(
+        active_holdings,
+        ["portfolio_name", "display_order", "asset_name", "holding_name", "id"],
+    ).reset_index(drop=True)
+
+
+def sort_by_available_columns(
+    frame: pd.DataFrame,
+    columns: list[str],
+    ascending: list[bool] | None = None,
+) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+
+    available_columns = [column for column in columns if column in frame.columns]
+    if not available_columns:
+        return frame
+
+    if ascending is None:
+        available_ascending = [True] * len(available_columns)
+    else:
+        ascending_map = {column: ascending[index] for index, column in enumerate(columns)}
+        available_ascending = [
+            ascending_map.get(column, True) for column in available_columns
+        ]
+
+    return frame.sort_values(
+        available_columns,
+        ascending=available_ascending,
+        na_position="last",
+    )
 
 
 def add_allocation_value(holdings: pd.DataFrame) -> pd.DataFrame:
@@ -1349,6 +1379,46 @@ def chart_legend(items: list[tuple[str, str]]) -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def bottom_chart_legend() -> alt.Legend:
+    return alt.Legend(orient="bottom", direction="horizontal")
+
+
+def categorical_chart_colors() -> list[str]:
+    if is_dark_theme():
+        return [
+            "#60a5fa",
+            "#22c55e",
+            "#f59e0b",
+            "#f87171",
+            "#a78bfa",
+            "#2dd4bf",
+            "#fb7185",
+            "#c084fc",
+            "#facc15",
+            "#38bdf8",
+        ]
+    return [
+        "#2563eb",
+        "#16a34a",
+        "#d97706",
+        "#dc2626",
+        "#7c3aed",
+        "#0f766e",
+        "#db2777",
+        "#9333ea",
+        "#ca8a04",
+        "#0284c7",
+    ]
+
+
+def label_color_map(labels: list[str]) -> dict[str, str]:
+    palette = categorical_chart_colors()
+    return {
+        label: palette[index % len(palette)]
+        for index, label in enumerate(labels)
+    }
 
 
 def render_total_gain_rate_donut(gain_rate: float | None) -> None:
@@ -2377,6 +2447,8 @@ def render_research_comparison_page(price_schema: str) -> None:
             tooltip.insert(3, alt.Tooltip("Average Price:Q", title="Average Price", format=",.2f"))
         if "USD Dollar Volume" in chart_data:
             tooltip.insert(4, alt.Tooltip("USD Dollar Volume:Q", title="USD Volume", format=",.0f"))
+        symbol_labels = chart_data["Symbol"].dropna().astype(str).drop_duplicates().tolist()
+        symbol_colors = label_color_map(symbol_labels)
         chart = (
             alt.Chart(chart_data)
             .mark_line(strokeWidth=2.4)
@@ -2387,12 +2459,23 @@ def render_research_comparison_page(price_schema: str) -> None:
                     title=y_title,
                     scale=alt.Scale(zero=False),
                 ),
-                color=alt.Color("Symbol:N", title=None),
+                color=alt.Color(
+                    "Symbol:N",
+                    title=None,
+                    legend=None,
+                    scale=alt.Scale(
+                        domain=list(symbol_colors.keys()),
+                        range=list(symbol_colors.values()),
+                    ),
+                ),
                 tooltip=tooltip,
             )
             .properties(height=460)
         )
     st.altair_chart(chart, width="stretch")
+    if not chart_data.empty and "Symbol" in chart_data:
+        symbol_labels = chart_data["Symbol"].dropna().astype(str).drop_duplicates().tolist()
+        chart_legend([(label, label_color_map(symbol_labels)[label]) for label in symbol_labels])
     if mode == "Normalized":
         st.caption(
             "Each selected symbol starts at 100 on its first available close in the "
@@ -2713,12 +2796,22 @@ def render_account_allocation(accounts: pd.DataFrame) -> None:
         drop=True
     )
 
+    account_labels = allocation["account_label"].dropna().astype(str).tolist()
+    account_colors = label_color_map(account_labels)
     chart = (
         alt.Chart(allocation)
         .mark_arc(innerRadius=58, outerRadius=130)
         .encode(
             theta=alt.Theta("current_balance:Q", stack=True),
-            color=alt.Color("account_label:N", title="Account"),
+            color=alt.Color(
+                "account_label:N",
+                title="Account",
+                legend=None,
+                scale=alt.Scale(
+                    domain=list(account_colors.keys()),
+                    range=list(account_colors.values()),
+                ),
+            ),
             tooltip=[
                 alt.Tooltip("account_name:N", title="Account"),
                 alt.Tooltip("institution:N", title="Institution"),
@@ -2736,6 +2829,7 @@ def render_account_allocation(accounts: pd.DataFrame) -> None:
         .properties(height=380)
     )
     st.altair_chart(chart, width="stretch")
+    chart_legend([(label, account_colors[label]) for label in account_labels])
     st.caption(f"Total account balance: {total_balance:,.2f}")
     st.dataframe(
         allocation,
@@ -2955,10 +3049,10 @@ def build_global_portfolio_overview(
     overview["allocation_pct"] = (
         overview["market_value"] / total_market_value if total_market_value > 0 else 0.0
     )
-    return overview.sort_values(
-        ["market_value", "display_order", "name"],
-        ascending=[False, True, True],
-        na_position="last",
+    overview["allocation_pct_display"] = overview["allocation_pct"] * 100
+    return sort_by_available_columns(
+        overview,
+        ["display_order", "name", "market_value"],
     ).reset_index(drop=True)
 
 
@@ -3015,13 +3109,24 @@ def render_global_portfolio_overview(portfolio_schema: str) -> None:
         st.caption(f"Total portfolio market value: {total_market_value:,.2f}")
 
     st.dataframe(
-        overview[["name", "market_value", "allocation_pct", "horizon_range_label", "horizon_midpoint_years"]],
+        overview[
+            [
+                "name",
+                "market_value",
+                "allocation_pct_display",
+                "horizon_range_label",
+                "horizon_midpoint_years",
+            ]
+        ],
         width="stretch",
         hide_index=True,
         column_config={
             "name": "Portfolio",
             "market_value": st.column_config.NumberColumn("Market Value", format="%.2f"),
-            "allocation_pct": st.column_config.NumberColumn("Allocation", format="%.2f%%"),
+            "allocation_pct_display": st.column_config.NumberColumn(
+                "Allocation",
+                format="%.2f%%",
+            ),
             "horizon_range_label": "Time Horizon",
             "horizon_midpoint_years": st.column_config.NumberColumn(
                 "Midpoint (Years)",
@@ -3031,7 +3136,7 @@ def render_global_portfolio_overview(portfolio_schema: str) -> None:
         column_order=[
             "name",
             "market_value",
-            "allocation_pct",
+            "allocation_pct_display",
             "horizon_range_label",
             "horizon_midpoint_years",
         ],
@@ -3377,9 +3482,12 @@ def render_holdings_principal_vs_growth(
 
     filter_col, _ = st.columns([1, 2.2])
     if view_mode == "View by Portfolio":
+        portfolio_filter_options = list(
+            dict.fromkeys(overview["portfolio_filter_label"].tolist())
+        )
         selected_portfolio = filter_col.selectbox(
             "Filter",
-            sorted(overview["portfolio_filter_label"].unique().tolist()),
+            portfolio_filter_options,
             key="holdings_principal_growth_portfolio",
         )
         overview = overview[
@@ -4199,6 +4307,16 @@ def render_portfolio_placeholder_page(portfolio: pd.Series) -> None:
 
     for tab, subpage in zip(st.tabs(PORTFOLIO_SUBPAGES), PORTFOLIO_SUBPAGES):
         with tab:
+            if subpage == PORTFOLIO_TAB_PROGRESS:
+                st.subheader(f"{portfolio_page} - {subpage}")
+                st.info("Placeholder. This section is ready for portfolio funding progress data.")
+                continue
+
+            if subpage == PORTFOLIO_TAB_RETURN_VS_INFLATION:
+                st.subheader(f"{portfolio_page} - {subpage}")
+                st.info("Placeholder. This section is ready for return-vs-inflation data.")
+                continue
+
             if subpage == "Investment Triangle":
                 render_investment_triangle_placeholder(portfolio_page)
                 continue
