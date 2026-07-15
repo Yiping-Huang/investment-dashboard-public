@@ -31,14 +31,14 @@ PORTFOLIO_ASSET_TYPES = {
     "redeemable_gic": "Flexible / Redeemable GIC",
     "equity_index": "Equity index",
     "equity": "Equity",
-    "bond": "Bond",
-    "fixed_income": "Fixed income",
+    "short_bond": "Short bond",
+    "intermediate_bond": "Intermediate bond",
+    "long_bond": "Long bond",
     "real_estate": "Real estate",
     "gold": "Gold",
     "commodity": "Commodity",
     "crypto": "Crypto",
     "alternative": "Alternative",
-    "balanced_fund": "Balanced fund",
     "other": "Other",
 }
 ACCOUNT_TYPE_LABELS = {
