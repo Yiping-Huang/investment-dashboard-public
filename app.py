@@ -84,7 +84,9 @@ PORTFOLIO_SUBPAGES = [
     PORTFOLIO_TAB_PROGRESS,
     PORTFOLIO_TAB_RETURN_VS_INFLATION,
     PORTFOLIO_TAB_ASSET_ALLOCATION,
+    "Holding Allocation",
     "Investment Triangle",
+    "Portfolio Planning",
 ]
 PORTFOLIO_SELECT_COLUMNS = (
     "id,name,slug,start_year,target_horizon_years_min,target_horizon_years_max,"
@@ -509,6 +511,84 @@ def load_holdings(portfolio_schema: str, symbol: str | None = None) -> pd.DataFr
         "weighted_average_cost",
     ]:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    return frame
+
+
+def load_asset_allocation_plans(
+    portfolio_schema: str,
+    portfolio_id: int | None = None,
+) -> pd.DataFrame:
+    access_token = supabase_auth_token()
+    if not access_token:
+        raise RuntimeError("Sign in before reading portfolio data.")
+
+    params: list[tuple[str, str]] = [
+        (
+            "select",
+            "id,portfolio_id,cash,savings_account,money_market,gic,redeemable_gic,"
+            "equity_index,equity,short_bond,intermediate_bond,long_bond,real_estate,"
+            "gold,commodity,crypto,alternative,other,notes,created_at,updated_at",
+        ),
+        ("order", "portfolio_id.asc"),
+    ]
+    if portfolio_id is not None:
+        params.append(("portfolio_id", f"eq.{portfolio_id}"))
+
+    rows = fetch_table(
+        portfolio_schema,
+        "asset_allocation_plans",
+        tuple(params),
+        access_token,
+    )
+    frame = pd.DataFrame(rows)
+    asset_columns = list(PORTFOLIO_ASSET_TYPES.keys())
+    for column in ["id", "portfolio_id", *asset_columns]:
+        if column not in frame:
+            frame[column] = pd.Series(dtype="object")
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    if "notes" not in frame:
+        frame["notes"] = pd.Series(dtype="object")
+    return frame
+
+
+def load_portfolio_preference_targets(
+    portfolio_schema: str,
+    portfolio_id: int | None = None,
+) -> pd.DataFrame:
+    access_token = supabase_auth_token()
+    if not access_token:
+        raise RuntimeError("Sign in before reading portfolio data.")
+
+    params: list[tuple[str, str]] = [
+        (
+            "select",
+            "id,portfolio_id,target_risk_score,target_liquidity_score,"
+            "target_return_score,notes,created_at,updated_at",
+        ),
+        ("order", "portfolio_id.asc"),
+    ]
+    if portfolio_id is not None:
+        params.append(("portfolio_id", f"eq.{portfolio_id}"))
+
+    rows = fetch_table(
+        portfolio_schema,
+        "portfolio_preference_targets",
+        tuple(params),
+        access_token,
+    )
+    frame = pd.DataFrame(rows)
+    for column in [
+        "id",
+        "portfolio_id",
+        "target_risk_score",
+        "target_liquidity_score",
+        "target_return_score",
+    ]:
+        if column not in frame:
+            frame[column] = pd.Series(dtype="object")
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    if "notes" not in frame:
+        frame["notes"] = pd.Series(dtype="object")
     return frame
 
 
@@ -4286,22 +4366,743 @@ def render_investment_triangle_placeholder(context: str) -> None:
     st.info("Placeholder. This section is ready for risk allocation data.")
 
 
-def render_simple_placeholder_page(page: str) -> None:
-    if page == SECTION_ASSETS:
-        details_tab = st.tabs(["Details"])[0]
-        with details_tab:
-            st.subheader("Asset Type Allocation")
-            st.info("Placeholder. This section is ready for asset type allocation data.")
+def time_progress_against_max_horizon(portfolio: pd.Series) -> float | None:
+    start_year = pd.to_numeric(portfolio.get("start_year"), errors="coerce")
+    max_horizon_years = pd.to_numeric(
+        portfolio.get("target_horizon_years_max"),
+        errors="coerce",
+    )
+    if pd.isna(start_year) or pd.isna(max_horizon_years) or float(max_horizon_years) <= 0:
+        return None
 
-            st.subheader("Asset Details")
-            st.info("Placeholder. This section is ready for asset detail data.")
+    start_date = pd.Timestamp(int(float(start_year)), 1, 1, tz=VANCOUVER_TZ)
+    current_date = pd.Timestamp.now(tz=VANCOUVER_TZ)
+    elapsed_days = max((current_date - start_date).total_seconds() / 86400.0, 0.0)
+    total_days = float(max_horizon_years) * 365.2425
+    if total_days <= 0:
+        return None
+    return min(max(elapsed_days / total_days, 0.0), 1.0)
+
+
+def build_portfolio_target_vs_actual_comparison(
+    portfolio: pd.Series,
+    portfolio_schema: str,
+) -> pd.DataFrame:
+    try:
+        holding_values = load_holding_current_values(portfolio_schema)
+        plans = load_asset_allocation_plans(
+            portfolio_schema,
+            portfolio_id=int(portfolio["id"]),
+        )
+    except RuntimeError as error:
+        st.error(str(error))
+        return pd.DataFrame()
+
+    active_holdings = holding_values[
+        (holding_values["portfolio_id"] == int(portfolio["id"]))
+        & holding_values["active"].fillna(False)
+        & ~holding_values["archived"].fillna(False)
+    ].copy()
+    active_holdings = add_allocation_value(active_holdings)
+    if not active_holdings.empty:
+        active_holdings = active_holdings[active_holdings["allocation_value"] > 0].copy()
+
+    actual_by_type = (
+        active_holdings.groupby("asset_type", as_index=False)["allocation_value"].sum()
+        if not active_holdings.empty
+        else pd.DataFrame(columns=["asset_type", "allocation_value"])
+    )
+    actual_lookup = dict(
+        zip(
+            actual_by_type.get("asset_type", pd.Series(dtype="object")),
+            actual_by_type.get("allocation_value", pd.Series(dtype="float64")),
+        )
+    )
+    plan_row = plans.iloc[0] if not plans.empty else None
+
+    rows: list[dict[str, Any]] = []
+    total_target = 0.0
+    total_actual = 0.0
+    for asset_type, label in PORTFOLIO_ASSET_TYPES.items():
+        target_value = (
+            0.0
+            if plan_row is None or pd.isna(plan_row.get(asset_type))
+            else float(plan_row.get(asset_type))
+        )
+        actual_value = float(actual_lookup.get(asset_type, 0.0) or 0.0)
+        if target_value == 0 and actual_value == 0:
+            continue
+        total_target += target_value
+        total_actual += actual_value
+        rows.append(
+            {
+                "asset_type": asset_type,
+                "asset_type_label": label,
+                "target_value": target_value,
+                "actual_value": actual_value,
+                "variance_value": actual_value - target_value,
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame()
+
+    comparison = pd.DataFrame(rows)
+    comparison["target_pct_display"] = (
+        comparison["target_value"] / total_target * 100 if total_target > 0 else 0.0
+    )
+    comparison["actual_pct_display"] = (
+        comparison["actual_value"] / total_actual * 100 if total_actual > 0 else 0.0
+    )
+    return comparison.sort_values(
+        ["actual_value", "target_value", "asset_type_label"],
+        ascending=[False, False, True],
+    ).reset_index(drop=True)
+
+
+def render_portfolio_funding_progress(
+    portfolio: pd.Series,
+    portfolio_schema: str,
+) -> None:
+    comparison = build_portfolio_target_vs_actual_comparison(portfolio, portfolio_schema)
+    if comparison.empty:
+        st.info("No target or actual allocation values found for this portfolio.")
+        return
+
+    portfolio_name = str(portfolio["name"])
+    target_value = float(comparison["target_value"].sum())
+    actual_value = float(comparison["actual_value"].sum())
+    gap_value = target_value - actual_value
+    progress_pct = 0.0 if target_value <= 0 else min(actual_value / target_value, 1.0)
+    time_progress_pct = time_progress_against_max_horizon(portfolio)
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Target value", f"{target_value:,.2f}")
+    col2.metric("Actual value", f"{actual_value:,.2f}")
+    col3.metric("Funding progress", f"{progress_pct * 100:.2f}%")
+    col4.metric(
+        "Time progress",
+        "Not set" if time_progress_pct is None else f"{time_progress_pct * 100:.2f}%",
+    )
+    st.caption(f"{portfolio_name} funding gap: {gap_value:,.2f}")
+
+    chart_data = pd.DataFrame(
+        [
+            {"segment": "Funded", "value": actual_value},
+            {"segment": "Gap", "value": max(gap_value, 0.0)},
+        ]
+    )
+    render_labeled_donut_chart(
+        values=chart_data,
+        category_field="segment",
+        value_field="value",
+        label_text=f"{progress_pct * 100:.0f}%",
+        color_range=["#0f766e", "#d1d5db"],
+        tooltip=[
+            alt.Tooltip("segment:N", title="Segment"),
+            alt.Tooltip("value:Q", title="Value", format=",.2f"),
+        ],
+        height=320,
+    )
+    chart_legend([("Funded", "#0f766e"), ("Gap", "#d1d5db")])
+
+
+def render_portfolio_target_vs_actual_allocation(
+    portfolio: pd.Series,
+    portfolio_schema: str,
+) -> None:
+    comparison = build_portfolio_target_vs_actual_comparison(portfolio, portfolio_schema)
+    if comparison.empty:
+        st.info("No target or actual allocation values found for this portfolio.")
+        return
+
+    chart_data = comparison[
+        ["asset_type_label", "target_value", "actual_value"]
+    ].melt(
+        id_vars="asset_type_label",
+        value_vars=["target_value", "actual_value"],
+        var_name="metric",
+        value_name="value",
+    )
+    chart_data["metric"] = chart_data["metric"].map(
+        {"target_value": "Target", "actual_value": "Actual"}
+    )
+    st.altair_chart(
+        alt.Chart(chart_data)
+        .mark_bar()
+        .encode(
+            y=alt.Y("asset_type_label:N", title="Asset type"),
+            x=alt.X("value:Q", title="Value"),
+            color=alt.Color("metric:N", title=None),
+            yOffset=alt.YOffset("metric:N"),
+            tooltip=[
+                alt.Tooltip("asset_type_label:N", title="Asset type"),
+                alt.Tooltip("metric:N", title="Metric"),
+                alt.Tooltip("value:Q", title="Value", format=",.2f"),
+            ],
+        )
+        .properties(height=max(260, min(640, 44 * len(comparison)))),
+        width="stretch",
+    )
+    st.dataframe(
+        comparison,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "asset_type_label": "Asset type",
+            "target_value": st.column_config.NumberColumn("Target value", format="%.2f"),
+            "actual_value": st.column_config.NumberColumn("Actual value", format="%.2f"),
+            "variance_value": st.column_config.NumberColumn("Gap", format="%.2f"),
+            "target_pct_display": st.column_config.NumberColumn(
+                "Target allocation",
+                format="%.2f%%",
+            ),
+            "actual_pct_display": st.column_config.NumberColumn(
+                "Actual allocation",
+                format="%.2f%%",
+            ),
+        },
+        column_order=[
+            "asset_type_label",
+            "target_value",
+            "actual_value",
+            "variance_value",
+            "target_pct_display",
+            "actual_pct_display",
+        ],
+    )
+
+
+def render_portfolio_asset_type_allocation(
+    portfolio: pd.Series,
+    portfolio_schema: str,
+) -> None:
+    try:
+        holding_values = load_holding_current_values(portfolio_schema)
+    except RuntimeError as error:
+        st.error(str(error))
+        return
+
+    portfolio_holdings = holding_values[
+        (holding_values["portfolio_id"] == int(portfolio["id"]))
+        & holding_values["active"].fillna(False)
+        & ~holding_values["archived"].fillna(False)
+    ].copy()
+    if portfolio_holdings.empty:
+        st.info("No active holdings found for this portfolio.")
+        return
+
+    portfolio_holdings = add_allocation_value(portfolio_holdings)
+    portfolio_holdings = portfolio_holdings[portfolio_holdings["allocation_value"] > 0]
+    if portfolio_holdings.empty:
+        st.info("No positive allocation values found for this portfolio.")
+        render_allocation_diagnostics(holding_values)
+        return
+
+    allocation = (
+        portfolio_holdings.assign(
+            asset_type_label=portfolio_holdings["asset_type"].map(PORTFOLIO_ASSET_TYPES).fillna(
+                portfolio_holdings["asset_type"]
+            )
+        )
+        .groupby("asset_type_label", as_index=False)["allocation_value"]
+        .sum()
+        .sort_values("allocation_value", ascending=False)
+        .reset_index(drop=True)
+    )
+    total_value = float(allocation["allocation_value"].sum())
+    allocation["allocation_pct_display"] = allocation["allocation_value"] / total_value * 100
+    labels = allocation["asset_type_label"].dropna().astype(str).tolist()
+    colors = label_color_map(labels)
+
+    st.altair_chart(
+        alt.Chart(allocation)
+        .mark_arc(innerRadius=58, outerRadius=130)
+        .encode(
+            theta=alt.Theta("allocation_value:Q", stack=True),
+            color=alt.Color(
+                "asset_type_label:N",
+                title=None,
+                legend=None,
+                scale=alt.Scale(
+                    domain=list(colors.keys()),
+                    range=list(colors.values()),
+                ),
+            ),
+            tooltip=[
+                alt.Tooltip("asset_type_label:N", title="Asset type"),
+                alt.Tooltip("allocation_value:Q", title="Allocation value", format=",.2f"),
+                alt.Tooltip("allocation_pct_display:Q", title="Allocation", format=".2f"),
+            ],
+        )
+        .properties(height=380),
+        width="stretch",
+    )
+    chart_legend([(label, colors[label]) for label in labels])
+    st.dataframe(
+        allocation,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "asset_type_label": "Asset type",
+            "allocation_value": st.column_config.NumberColumn(
+                "Allocation value",
+                format="%.2f",
+            ),
+            "allocation_pct_display": st.column_config.NumberColumn(
+                "Allocation",
+                format="%.2f%%",
+            ),
+        },
+    )
+    st.markdown(f"### {PORTFOLIO_TAB_TARGET_VS_ACTUAL}")
+    render_portfolio_target_vs_actual_allocation(portfolio, portfolio_schema)
+
+
+def render_global_asset_type_allocation(portfolio_schema: str) -> None:
+    try:
+        holding_values = load_holding_current_values(portfolio_schema)
+    except RuntimeError as error:
+        st.error(str(error))
+        return
+
+    active_holdings = holding_values[
+        holding_values["active"].fillna(False)
+        & ~holding_values["archived"].fillna(False)
+    ].copy()
+    if active_holdings.empty:
+        st.info("No active holdings found across portfolios.")
+        return
+
+    active_holdings = add_allocation_value(active_holdings)
+    active_holdings = active_holdings[active_holdings["allocation_value"] > 0]
+    if active_holdings.empty:
+        st.info("No positive allocation values found across portfolios.")
+        return
+
+    allocation = (
+        active_holdings.assign(
+            asset_type_label=active_holdings["asset_type"].map(PORTFOLIO_ASSET_TYPES).fillna(
+                active_holdings["asset_type"]
+            )
+        )
+        .groupby("asset_type_label", as_index=False)
+        .agg(
+            allocation_value=("allocation_value", "sum"),
+            portfolio_count=("portfolio_id", "nunique"),
+            holding_count=("id", "nunique"),
+        )
+        .sort_values("allocation_value", ascending=False)
+        .reset_index(drop=True)
+    )
+    total_value = float(allocation["allocation_value"].sum())
+    allocation["allocation_pct_display"] = allocation["allocation_value"] / total_value * 100
+    labels = allocation["asset_type_label"].dropna().astype(str).tolist()
+    colors = label_color_map(labels)
+
+    st.altair_chart(
+        alt.Chart(allocation)
+        .mark_arc(innerRadius=58, outerRadius=130)
+        .encode(
+            theta=alt.Theta("allocation_value:Q", stack=True),
+            color=alt.Color(
+                "asset_type_label:N",
+                title=None,
+                legend=None,
+                scale=alt.Scale(
+                    domain=list(colors.keys()),
+                    range=list(colors.values()),
+                ),
+            ),
+            tooltip=[
+                alt.Tooltip("asset_type_label:N", title="Asset type"),
+                alt.Tooltip("allocation_value:Q", title="Allocation value", format=",.2f"),
+                alt.Tooltip("allocation_pct_display:Q", title="Allocation", format=".2f"),
+                alt.Tooltip("portfolio_count:Q", title="Portfolios", format=",.0f"),
+                alt.Tooltip("holding_count:Q", title="Holdings", format=",.0f"),
+            ],
+        )
+        .properties(height=380),
+        width="stretch",
+    )
+    chart_legend([(label, colors[label]) for label in labels])
+    st.dataframe(
+        allocation,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "asset_type_label": "Asset type",
+            "allocation_value": st.column_config.NumberColumn(
+                "Allocation value",
+                format="%.2f",
+            ),
+            "allocation_pct_display": st.column_config.NumberColumn(
+                "Allocation",
+                format="%.2f%%",
+            ),
+            "portfolio_count": st.column_config.NumberColumn("Portfolios", format="%d"),
+            "holding_count": st.column_config.NumberColumn("Holdings", format="%d"),
+        },
+    )
+
+
+def render_portfolio_holding_allocation(
+    portfolio: pd.Series,
+    portfolio_schema: str,
+) -> None:
+    try:
+        holding_values = load_holding_current_values(portfolio_schema)
+    except RuntimeError as error:
+        st.error(str(error))
+        return
+
+    portfolio_holdings = holding_values[
+        (holding_values["portfolio_id"] == int(portfolio["id"]))
+        & holding_values["active"].fillna(False)
+        & ~holding_values["archived"].fillna(False)
+    ].copy()
+    if portfolio_holdings.empty:
+        st.info("No active holdings found for this portfolio.")
+        return
+
+    portfolio_holdings = add_allocation_value(portfolio_holdings)
+    portfolio_holdings = portfolio_holdings[portfolio_holdings["allocation_value"] > 0]
+    if portfolio_holdings.empty:
+        st.info("No positive allocation values found for this portfolio.")
+        return
+
+    portfolio_holdings["holding_label"] = portfolio_holdings.apply(holdings_display_name, axis=1)
+    portfolio_holdings["asset_type_label"] = portfolio_holdings["asset_type"].map(
+        PORTFOLIO_ASSET_TYPES
+    ).fillna(portfolio_holdings["asset_type"])
+    allocation = portfolio_holdings[
+        [
+            "holding_label",
+            "asset_name",
+            "ticker",
+            "asset_type_label",
+            "allocation_value",
+            "current_value",
+        ]
+    ].sort_values("allocation_value", ascending=False)
+    total_value = float(allocation["allocation_value"].sum())
+    allocation["allocation_pct_display"] = allocation["allocation_value"] / total_value * 100
+    labels = allocation["holding_label"].dropna().astype(str).tolist()
+    colors = label_color_map(labels)
+
+    st.altair_chart(
+        alt.Chart(allocation)
+        .mark_arc(innerRadius=58, outerRadius=130)
+        .encode(
+            theta=alt.Theta("allocation_value:Q", stack=True),
+            color=alt.Color(
+                "holding_label:N",
+                title=None,
+                legend=None,
+                scale=alt.Scale(
+                    domain=list(colors.keys()),
+                    range=list(colors.values()),
+                ),
+            ),
+            tooltip=[
+                alt.Tooltip("holding_label:N", title="Holding"),
+                alt.Tooltip("asset_name:N", title="Asset"),
+                alt.Tooltip("asset_type_label:N", title="Asset type"),
+                alt.Tooltip("allocation_value:Q", title="Allocation value", format=",.2f"),
+                alt.Tooltip("current_value:Q", title="Current value", format=",.2f"),
+                alt.Tooltip("allocation_pct_display:Q", title="Allocation", format=".2f"),
+            ],
+        )
+        .properties(height=380),
+        width="stretch",
+    )
+    chart_legend([(label, colors[label]) for label in labels])
+    st.dataframe(
+        allocation,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "holding_label": "Holding",
+            "asset_name": "Asset",
+            "ticker": "Ticker",
+            "asset_type_label": "Asset type",
+            "allocation_value": st.column_config.NumberColumn(
+                "Allocation value",
+                format="%.2f",
+            ),
+            "current_value": st.column_config.NumberColumn("Value", format="%.2f"),
+            "allocation_pct_display": st.column_config.NumberColumn(
+                "Allocation",
+                format="%.2f%%",
+            ),
+        },
+    )
+
+
+def render_portfolio_investment_triangle(
+    portfolio: pd.Series,
+    portfolio_schema: str,
+) -> None:
+    try:
+        holding_values = load_holding_current_values(portfolio_schema)
+        preference_targets = load_portfolio_preference_targets(
+            portfolio_schema,
+            portfolio_id=int(portfolio["id"]),
+        )
+    except RuntimeError as error:
+        st.error(str(error))
+        return
+
+    portfolio_holdings = holding_values[
+        (holding_values["portfolio_id"] == int(portfolio["id"]))
+        & holding_values["active"].fillna(False)
+        & ~holding_values["archived"].fillna(False)
+    ].copy()
+    if portfolio_holdings.empty:
+        st.info("No active holdings found for this portfolio.")
+        return
+
+    portfolio_holdings = add_allocation_value(portfolio_holdings)
+    portfolio_holdings = portfolio_holdings[portfolio_holdings["allocation_value"] > 0]
+    scored = portfolio_holdings[
+        portfolio_holdings[["risk_score", "liquidity_score", "return_score"]]
+        .notna()
+        .any(axis=1)
+    ].copy()
+    if scored.empty:
+        st.info("No holdings have investment-triangle scores yet.")
+        return
+
+    total_value = float(portfolio_holdings["allocation_value"].sum())
+    def weighted_average(column: str) -> float:
+        valid = scored[scored[column].notna()].copy()
+        if valid.empty:
+            return 0.0
+        return float((valid["allocation_value"] * valid[column]).sum()) / float(
+            valid["allocation_value"].sum()
+        )
+
+    weighted_scores = pd.DataFrame(
+        [
+            {"axis": "Risk", "score": weighted_average("risk_score")},
+            {"axis": "Liquidity", "score": weighted_average("liquidity_score")},
+            {"axis": "Return", "score": weighted_average("return_score")},
+        ]
+    )
+    target_row = preference_targets.iloc[0] if not preference_targets.empty else None
+    target_scores = pd.DataFrame(
+        [
+            {"axis": "Risk", "score": target_row.get("target_risk_score")},
+            {"axis": "Liquidity", "score": target_row.get("target_liquidity_score")},
+            {"axis": "Return", "score": target_row.get("target_return_score")},
+        ]
+    ) if target_row is not None else pd.DataFrame(columns=["axis", "score"])
+    target_scores = target_scores[target_scores["score"].notna()].copy()
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Current portfolio value", f"{total_value:,.2f}")
+    col2.metric(
+        "Weighted risk",
+        f"{float(weighted_scores.loc[weighted_scores['axis'] == 'Risk', 'score'].iloc[0]):.1f}",
+    )
+    col3.metric(
+        "Weighted liquidity",
+        f"{float(weighted_scores.loc[weighted_scores['axis'] == 'Liquidity', 'score'].iloc[0]):.1f}",
+    )
+    col4.metric(
+        "Weighted return",
+        f"{float(weighted_scores.loc[weighted_scores['axis'] == 'Return', 'score'].iloc[0]):.1f}",
+    )
+    components.html(
+        svg_triangle_radar(weighted_scores, target_scores if not target_scores.empty else None),
+        height=430,
+        scrolling=False,
+    )
+
+    detail_rows = scored.assign(
+        holding_label=scored.apply(holdings_display_name, axis=1),
+        asset_type_label=scored["asset_type"].map(PORTFOLIO_ASSET_TYPES).fillna(scored["asset_type"]),
+    ).sort_values("allocation_value", ascending=False)
+    st.dataframe(
+        detail_rows[
+            [
+                "holding_label",
+                "asset_type_label",
+                "risk_score",
+                "liquidity_score",
+                "return_score",
+                "allocation_value",
+            ]
+        ],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "holding_label": "Holding",
+            "asset_type_label": "Asset type",
+            "risk_score": st.column_config.NumberColumn("Risk", format="%.1f"),
+            "liquidity_score": st.column_config.NumberColumn("Liquidity", format="%.1f"),
+            "return_score": st.column_config.NumberColumn("Return", format="%.1f"),
+            "allocation_value": st.column_config.NumberColumn(
+                "Current value",
+                format="%.2f",
+            ),
+        },
+    )
+
+
+def render_portfolio_planning_read_only(
+    portfolio: pd.Series,
+    portfolio_schema: str,
+) -> None:
+    try:
+        plans = load_asset_allocation_plans(
+            portfolio_schema,
+            portfolio_id=int(portfolio["id"]),
+        )
+        preference_targets = load_portfolio_preference_targets(
+            portfolio_schema,
+            portfolio_id=int(portfolio["id"]),
+        )
+    except RuntimeError as error:
+        st.error(str(error))
+        return
+
+    plan_row = plans.iloc[0] if not plans.empty else None
+    pref_row = preference_targets.iloc[0] if not preference_targets.empty else None
+
+    st.subheader(f"{portfolio['name']} - Portfolio Planning")
+    st.caption("Read-only planning targets exported from the private dashboard.")
+
+    st.markdown("### Portfolio Preference Targets")
+    if pref_row is None:
+        st.info("No portfolio preference targets found.")
+    else:
+        col1, col2, col3 = st.columns(3)
+        col1.metric(
+            "Target risk",
+            format_optional_number(pref_row.get("target_risk_score"), 1),
+        )
+        col2.metric(
+            "Target liquidity",
+            format_optional_number(pref_row.get("target_liquidity_score"), 1),
+        )
+        col3.metric(
+            "Target return",
+            format_optional_number(pref_row.get("target_return_score"), 1),
+        )
+        if pref_row.get("notes") and not pd.isna(pref_row.get("notes")):
+            st.caption(str(pref_row.get("notes")))
+
+    st.markdown("### Allocation Plan")
+    if plan_row is None:
+        st.info("No allocation plan found.")
+        return
+
+    allocation_rows = pd.DataFrame(
+        [
+            {
+                "asset_type": label,
+                "target_value": float(plan_row.get(asset_type) or 0.0),
+            }
+            for asset_type, label in PORTFOLIO_ASSET_TYPES.items()
+            if not pd.isna(plan_row.get(asset_type)) and float(plan_row.get(asset_type) or 0.0) > 0
+        ]
+    )
+    if allocation_rows.empty:
+        st.info("No non-zero target allocation values found.")
+    else:
+        st.dataframe(
+            allocation_rows,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "asset_type": "Asset type",
+                "target_value": st.column_config.NumberColumn(
+                    "Target value",
+                    format="%.2f",
+                ),
+            },
+        )
+    if plan_row.get("notes") and not pd.isna(plan_row.get("notes")):
+        st.caption(str(plan_row.get("notes")))
+
+
+def render_assets_section(
+    price_schema: str,
+    portfolio_schema: str,
+) -> None:
+    type_allocation_tab, details_tab = st.tabs(["Type Allocation", "Details"])
+
+    with type_allocation_tab:
+        st.subheader("Asset Type Allocation")
+        render_global_asset_type_allocation(portfolio_schema)
+
+    with details_tab:
+        try:
+            assets = load_assets(price_schema)
+        except RuntimeError as error:
+            st.error(str(error))
+            st.stop()
+
+        if assets.empty:
+            st.info("No assets found yet.")
+            st.stop()
+
+        symbols = assets["symbol"].dropna().astype(str).sort_values().tolist()
+        controls_col, _ = st.columns([1, 2])
+        with controls_col:
+            selected_symbol = st.selectbox("Asset", symbols, key="assets_detail_symbol")
+            history_window_label = st.selectbox(
+                "History window",
+                list(HISTORY_WINDOW_OPTIONS.keys()),
+                index=list(HISTORY_WINDOW_OPTIONS.keys()).index("180 Days"),
+                key="assets_detail_history_window",
+            )
+            target_cagr_pct = st.number_input(
+                "Target CAGR",
+                min_value=-50.0,
+                max_value=50.0,
+                value=DEFAULT_TARGET_CAGR * 100,
+                step=0.5,
+                format="%.1f",
+                key="assets_detail_target_cagr",
+            )
+            show_rows = st.checkbox(
+                "Show raw rows",
+                value=False,
+                key="assets_detail_show_rows",
+            )
+
+        lookback_days = HISTORY_WINDOW_OPTIONS[history_window_label]
+        render_asset_page(
+            price_schema,
+            portfolio_schema,
+            assets,
+            lookback_days,
+            target_cagr_pct / 100,
+            show_rows,
+            selected_symbol,
+        )
+
+
+def render_simple_placeholder_page(
+    page: str,
+    price_schema: str,
+    portfolio_schema: str,
+) -> None:
+    if page == SECTION_ASSETS:
+        render_assets_section(price_schema, portfolio_schema)
         return
 
     st.subheader(page)
     st.info("Placeholder. This dashboard page is ready for future data and charts.")
 
 
-def render_portfolio_placeholder_page(portfolio: pd.Series) -> None:
+def render_portfolio_placeholder_page(
+    portfolio: pd.Series,
+    price_schema: str,
+    portfolio_schema: str,
+) -> None:
     portfolio_page = str(portfolio["name"])
     render_portfolio_metadata_summary(portfolio)
 
@@ -4309,16 +5110,30 @@ def render_portfolio_placeholder_page(portfolio: pd.Series) -> None:
         with tab:
             if subpage == PORTFOLIO_TAB_PROGRESS:
                 st.subheader(f"{portfolio_page} - {subpage}")
-                st.info("Placeholder. This section is ready for portfolio funding progress data.")
+                render_portfolio_funding_progress(portfolio, portfolio_schema)
                 continue
 
             if subpage == PORTFOLIO_TAB_RETURN_VS_INFLATION:
                 st.subheader(f"{portfolio_page} - {subpage}")
-                st.info("Placeholder. This section is ready for return-vs-inflation data.")
+                st.info("Portfolio return-vs-inflation sync is not exported yet.")
+                continue
+
+            if subpage == PORTFOLIO_TAB_ASSET_ALLOCATION:
+                st.subheader(f"{portfolio_page} - {subpage}")
+                render_portfolio_asset_type_allocation(portfolio, portfolio_schema)
+                continue
+
+            if subpage == "Holding Allocation":
+                st.subheader(f"{portfolio_page} - {subpage}")
+                render_portfolio_holding_allocation(portfolio, portfolio_schema)
                 continue
 
             if subpage == "Investment Triangle":
-                render_investment_triangle_placeholder(portfolio_page)
+                render_portfolio_investment_triangle(portfolio, portfolio_schema)
+                continue
+
+            if subpage == "Portfolio Planning":
+                render_portfolio_planning_read_only(portfolio, portfolio_schema)
                 continue
 
             st.subheader(f"{portfolio_page} - {subpage}")
@@ -4445,11 +5260,15 @@ def main() -> None:
         if selected_portfolio is None:
             st.warning("Portfolio is no longer available.")
             st.stop()
-        render_portfolio_placeholder_page(selected_portfolio)
+        render_portfolio_placeholder_page(
+            selected_portfolio,
+            price_schema,
+            portfolio_schema,
+        )
         return
 
     if section == SECTION_ASSETS:
-        render_simple_placeholder_page(section)
+        render_simple_placeholder_page(section, price_schema, portfolio_schema)
         return
 
     if section != SECTION_HOLDINGS:
