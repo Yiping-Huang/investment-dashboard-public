@@ -95,6 +95,7 @@ PORTFOLIO_SELECT_COLUMNS = (
 SECTION_SUBPAGES = {
     SECTION_OVERVIEW: [
         "Net Worth",
+        "Investment Income",
         "Return vs Inflation",
         "Investment Triangle",
         "Portfolio Overview",
@@ -589,6 +590,39 @@ def load_portfolio_preference_targets(
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
     if "notes" not in frame:
         frame["notes"] = pd.Series(dtype="object")
+    return frame
+
+
+@st.cache_data(ttl=3600)
+def load_monthly_snapshots(portfolio_schema: str) -> pd.DataFrame:
+    """Read overview snapshots only; public deployments never write snapshots."""
+    access_token = supabase_auth_token()
+    if not access_token:
+        raise RuntimeError("Sign in before reading portfolio data.")
+
+    rows = fetch_table(
+        portfolio_schema,
+        "monthly_snapshots",
+        (
+            (
+                "select",
+                "snapshot_month,month_end_date,net_worth,principal_value",
+            ),
+            ("snapshot_scope", "eq.overview"),
+            ("portfolio_id", "is.null"),
+            ("order", "snapshot_month.asc"),
+        ),
+        access_token,
+    )
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+    for column in ["net_worth", "principal_value"]:
+        if column in frame:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    for column in ["snapshot_month", "month_end_date"]:
+        if column in frame:
+            frame[column] = pd.to_datetime(frame[column], errors="coerce")
     return frame
 
 
@@ -4258,6 +4292,135 @@ def render_market_research_page(price_schema: str) -> None:
     render_average_volume_chart(symbol, display_prices)
 
 
+def build_public_live_investment_income_row(
+    holdings: pd.DataFrame,
+    transactions: pd.DataFrame,
+) -> pd.DataFrame:
+    active_holdings = ensure_principal_value_column(active_detail_rows(holdings))
+    if active_holdings.empty:
+        return pd.DataFrame()
+    active_holdings["current_value"] = pd.to_numeric(
+        active_holdings.get("current_value"), errors="coerce"
+    ).fillna(0)
+    fallback_principal = pd.to_numeric(
+        active_holdings.get("principal_value"), errors="coerce"
+    ).fillna(0)
+    principal_adjustments = holding_principal_adjustments(transactions)
+    principal_values = active_holdings["id"].map(principal_adjustments)
+    principal_values = pd.to_numeric(principal_values, errors="coerce").where(
+        principal_values.notna(), fallback_principal
+    )
+    current_day = pd.Timestamp(date.today())
+    return pd.DataFrame(
+        [
+            {
+                "month_end": current_day,
+                "month_label": f"{current_day.strftime('%Y-%m-%d')} Live",
+                "net_worth": float(active_holdings["current_value"].sum()),
+                "principal_value": float(principal_values.fillna(0).sum()),
+                "is_live": True,
+            }
+        ]
+    )
+
+
+def render_investment_income_page(portfolio_schema: str) -> None:
+    """Read-only investment-income history from monthly snapshots."""
+    try:
+        snapshots = load_monthly_snapshots(portfolio_schema)
+        holdings = load_holding_current_values(portfolio_schema)
+        transactions = load_holding_transactions_current(portfolio_schema)
+    except RuntimeError as error:
+        st.error(str(error))
+        return
+
+    history = snapshots.copy()
+    if not history.empty:
+        history["month_end"] = pd.to_datetime(
+            history.get("month_end_date"), errors="coerce"
+        )
+        history = history.dropna(
+            subset=["month_end", "net_worth", "principal_value"]
+        ).copy()
+        history["investment_income"] = (
+            history["net_worth"] - history["principal_value"]
+        )
+        history["month_label"] = history["month_end"].dt.strftime("%Y %b")
+        history["is_live"] = False
+
+    live = build_public_live_investment_income_row(holdings, transactions)
+    if not live.empty:
+        live["investment_income"] = live["net_worth"] - live["principal_value"]
+        history = history[history["month_end"] < live.iloc[0]["month_end"]].copy()
+        rows = pd.concat([history, live], ignore_index=True)
+    else:
+        rows = history
+    if rows.empty:
+        st.info("No investment-income data is available yet.")
+        return
+
+    rows = rows.sort_values("month_end").reset_index(drop=True)
+    rows["monthly_income_change"] = rows["investment_income"].diff()
+    completed_rows = rows[~rows["is_live"].fillna(False)]
+    last_completed = completed_rows.iloc[-1] if not completed_rows.empty else None
+    current_row = rows.iloc[-1]
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric(
+        "Last completed month investment income",
+        "Not available" if last_completed is None else f"{last_completed.investment_income:,.2f}",
+    )
+    col2.metric(
+        "Last month change",
+        "Not available"
+        if last_completed is None or pd.isna(last_completed.monthly_income_change)
+        else f"{last_completed.monthly_income_change:,.2f}",
+    )
+    col3.metric("This month investment income", f"{current_row.investment_income:,.2f}")
+    col4.metric(
+        "This month change",
+        "Not available"
+        if pd.isna(current_row.monthly_income_change)
+        else f"{current_row.monthly_income_change:,.2f}",
+    )
+
+    palette = chart_palette()
+    chart = (
+        alt.Chart(rows)
+        .mark_line(color=palette["target_growth"], point=True, strokeWidth=2.8)
+        .encode(
+            x=alt.X(
+                "month_label:N",
+                sort=rows["month_label"].tolist(),
+                title=None,
+                axis=alt.Axis(labelAngle=-35),
+            ),
+            y=alt.Y(
+                "investment_income:Q",
+                title="Investment income",
+                scale=alt.Scale(zero=False),
+            ),
+            tooltip=[
+                alt.Tooltip("month_label:N", title="Month"),
+                alt.Tooltip("net_worth:Q", title="Net worth", format=",.2f"),
+                alt.Tooltip("principal_value:Q", title="Principal", format=",.2f"),
+                alt.Tooltip(
+                    "investment_income:Q", title="Investment income", format=",.2f"
+                ),
+                alt.Tooltip(
+                    "monthly_income_change:Q", title="Change vs prior month", format=",.2f"
+                ),
+            ],
+        )
+        .properties(height=420)
+    )
+    st.altair_chart(chart, width="stretch")
+    st.caption(
+        "Investment income = snapshot net worth − snapshot net contributed principal. "
+        "The live row uses the same formula with current balances."
+    )
+
+
 def render_placeholder_section(
     section: str,
     price_schema: str | None = None,
@@ -4303,6 +4466,14 @@ def render_section_subpage(
             return
         st.subheader(f"{section} - Return vs Inflation")
         render_return_vs_inflation_page(price_schema)
+        return
+
+    if section == SECTION_OVERVIEW and subpage == "Investment Income":
+        if portfolio_schema is None:
+            st.info("Portfolio schema is not configured.")
+            return
+        st.subheader(f"{section} - Investment Income")
+        render_investment_income_page(portfolio_schema)
         return
 
     if subpage == "Investment Triangle":
